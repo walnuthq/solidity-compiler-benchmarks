@@ -1,0 +1,15 @@
+[submodule "v2-core"]
+	path = v2-core
+	url = https://github.com/Uniswap/v2-core.git
+[submodule "v3-core"]
+	path = v3-core
+	url = https://github.com/Uniswap/v3-core.git
+[submodule "openzeppelin-contracts"]
+	path = openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts.git
+[submodule "nitro-contracts"]
+	path = nitro-contracts
+	url = https://github.com/OffchainLabs/nitro-contracts
+[submodule "aave-v3-core"]
+	path = aave-v3-core
+	url = https://github.com/aave/aave-v3-core.git
