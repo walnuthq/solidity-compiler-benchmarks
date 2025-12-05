@@ -1,6 +1,10 @@
 # Solidity Compiler Benchmark
 
-This repository collects a handful of well-known Solidity contracts and scripts to evaulate compilers in many aspects. For now, it evaluates quality of ETHDebug generated, but it will contain benchmarks for gas, codesize, etc.
+This repository collects a handful of well-known Solidity contracts and scripts to evaluate compilers in many aspects:
+
+- **ETHDebug coverage** (`bench.py`) - Evaluates quality of debug information
+- **MLIR compilation testing** (`mlir_bench.py`) - Tests MLIR pipeline compatibility
+- **Gas comparison** (`gas_bench.py`) - Compares gas usage between compiler configurations
 
 Currently, it runs the [`ethdebug-stats`](https://github.com/walnuthq/ethdebug-stats) analyzer against those popular contracts and it is designed to answer questions such as “how good are the source mappings for Uniswap, Aave, or Offchain Labs contracts when compiled with a given compiler build?”
 
@@ -78,3 +82,69 @@ Compiler rows currently mean the following:
 - Any other `solc-X.Y.Z` you pass on the command line is accepted dynamically:
   if `X.Y.Z < 0.8.29` the script knows ethdebug is unavailable and records
   zero line/variable coverage with `status=no_ethdebug_support`.
+
+---
+
+## MLIR Pipeline Benchmarks
+
+### MLIR Compilation Testing (`mlir_bench.py`)
+
+Tests the MLIR compilation pipeline across contracts to identify supported/unsupported features.
+
+```bash
+# Basic usage with custom solc path
+./mlir_bench.py --solc /path/to/mlir-enabled/solc
+
+# Test only MLIR-specific modes (skip baseline)
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes
+
+# Include known-working MLIR test contracts
+./mlir_bench.py --solc ../solidity/build/solc/solc --include-mlir-tests
+
+# Verbose output with error details
+./mlir_bench.py --solc ../solidity/build/solc/solc --verbose
+```
+
+**Compilation Modes:**
+- `baseline` - Standard `--bin` compilation
+- `mlir-optimize` - MLIR-optimized compilation (`--mlir-optimize --bin`)
+- `mlir-print` - Print MLIR dialect (`--mlir-optimize --print-mlir`)
+- `mlir-analyze` - MLIR security analysis (`--mlir-optimize --mlir-analyze --bin`)
+- `via-ir-optimize` - Standard via-ir with optimizer
+
+**Error Categories:**
+The benchmark categorizes compilation failures to track MLIR implementation gaps:
+- `mlir_type_mismatch` - Type errors in MLIR operations
+- `mlir_parent_op` - CFG/region structure issues
+- `mlir_verifier` - MLIR verification failures
+- `import_error` - Missing dependencies
+- `unimplemented` - Features not yet implemented
+
+Results are saved to `mlir_results/` as JSON and CSV.
+
+### Gas Comparison (`gas_bench.py`)
+
+Compares gas usage between standard and MLIR-optimized compilation.
+
+**Prerequisites:**
+- [Foundry](https://getfoundry.sh/) installed (`anvil`, `cast`)
+- MLIR-enabled solc build
+
+```bash
+# Start anvil and run benchmarks
+./gas_bench.py --solc ../solidity/build/solc/solc --start-anvil
+
+# Use existing anvil instance
+./gas_bench.py --solc ../solidity/build/solc/solc --rpc-url http://127.0.0.1:8545
+
+# Run specific test cases
+./gas_bench.py --solc ../solidity/build/solc/solc --tests factorial counter
+```
+
+**Test Cases:**
+- `factorial` - Storage caching optimization target
+- `counter` - Simple increment loop
+- `sum-array` - Range summation with storage writes
+- `arithmetic` - Mixed arithmetic operations
+
+Results show gas comparison between `via-ir --optimize` and `--mlir-optimize`.

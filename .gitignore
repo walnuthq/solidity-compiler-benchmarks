@@ -1,4 +1,7 @@
 artifacts/
 results/
+mlir_artifacts/
+mlir_results/
+gas_results/
 __pycache__/
 *.log
