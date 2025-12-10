@@ -523,7 +523,7 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilFlashloan.sol",
         contract_name="LilFlashloan",
-        remappings={"solmate/": "solmate/src/"},
+        remappings={"solmate/": "lib/solmate/src/"},
     ),
     ContractConfig(
         contract_id="lilweb3-fractional",
@@ -532,7 +532,7 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilFractional.sol",
         contract_name="LilFractional",
-        remappings={"solmate/": "solmate/src/"},
+        remappings={"solmate/": "lib/solmate/src/"},
     ),
     ContractConfig(
         contract_id="lilweb3-gnosis",
@@ -549,7 +549,7 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilJuicebox.sol",
         contract_name="LilJuicebox",
-        remappings={"solmate/": "solmate/src/"},
+        remappings={"solmate/": "lib/solmate/src/"},
     ),
     ContractConfig(
         contract_id="lilweb3-opensea",
@@ -558,7 +558,7 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilOpenSea.sol",
         contract_name="LilOpenSea",
-        remappings={"solmate/": "solmate/src/"},
+        remappings={"solmate/": "lib/solmate/src/"},
     ),
     ContractConfig(
         contract_id="lilweb3-superfluid",
@@ -567,7 +567,7 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilSuperfluid.sol",
         contract_name="LilSuperfluid",
-        remappings={"solmate/": "solmate/src/"},
+        remappings={"solmate/": "lib/solmate/src/"},
     ),
 )
 
