@@ -354,6 +354,235 @@ SECURITY_PITFALLS_CONTRACTS: Sequence[ContractConfig] = (
     ),
 )
 
+# Solmate contracts - gas-optimized building blocks
+SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
+    # Tokens
+    ContractConfig(
+        contract_id="solmate-erc20",
+        project="solmate",
+        label="ERC20 - Gas-optimized ERC20",
+        repo_path="solmate",
+        source="src/tokens/ERC20.sol",
+        contract_name="ERC20",
+    ),
+    ContractConfig(
+        contract_id="solmate-erc721",
+        project="solmate",
+        label="ERC721 - Gas-optimized ERC721",
+        repo_path="solmate",
+        source="src/tokens/ERC721.sol",
+        contract_name="ERC721",
+    ),
+    ContractConfig(
+        contract_id="solmate-erc1155",
+        project="solmate",
+        label="ERC1155 - Gas-optimized ERC1155",
+        repo_path="solmate",
+        source="src/tokens/ERC1155.sol",
+        contract_name="ERC1155",
+    ),
+    ContractConfig(
+        contract_id="solmate-erc4626",
+        project="solmate",
+        label="ERC4626 - Tokenized vault",
+        repo_path="solmate",
+        source="src/tokens/ERC4626.sol",
+        contract_name="ERC4626",
+    ),
+    ContractConfig(
+        contract_id="solmate-erc6909",
+        project="solmate",
+        label="ERC6909 - Multi-token",
+        repo_path="solmate",
+        source="src/tokens/ERC6909.sol",
+        contract_name="ERC6909",
+    ),
+    ContractConfig(
+        contract_id="solmate-weth",
+        project="solmate",
+        label="WETH - Wrapped Ether",
+        repo_path="solmate",
+        source="src/tokens/WETH.sol",
+        contract_name="WETH",
+    ),
+    # Auth
+    ContractConfig(
+        contract_id="solmate-owned",
+        project="solmate",
+        label="Owned - Simple ownership",
+        repo_path="solmate",
+        source="src/auth/Owned.sol",
+        contract_name="Owned",
+    ),
+    ContractConfig(
+        contract_id="solmate-auth",
+        project="solmate",
+        label="Auth - Flexible authority",
+        repo_path="solmate",
+        source="src/auth/Auth.sol",
+        contract_name="Auth",
+    ),
+    # Utils
+    ContractConfig(
+        contract_id="solmate-fixedpoint",
+        project="solmate",
+        label="FixedPointMathLib - Math utils",
+        repo_path="solmate",
+        source="src/utils/FixedPointMathLib.sol",
+        contract_name="FixedPointMathLib",
+    ),
+    ContractConfig(
+        contract_id="solmate-safecast",
+        project="solmate",
+        label="SafeCastLib - Safe casting",
+        repo_path="solmate",
+        source="src/utils/SafeCastLib.sol",
+        contract_name="SafeCastLib",
+    ),
+    ContractConfig(
+        contract_id="solmate-safetransfer",
+        project="solmate",
+        label="SafeTransferLib - Safe transfers",
+        repo_path="solmate",
+        source="src/utils/SafeTransferLib.sol",
+        contract_name="SafeTransferLib",
+    ),
+    ContractConfig(
+        contract_id="solmate-reentrancyguard",
+        project="solmate",
+        label="ReentrancyGuard - Reentrancy protection",
+        repo_path="solmate",
+        source="src/utils/ReentrancyGuard.sol",
+        contract_name="ReentrancyGuard",
+    ),
+    ContractConfig(
+        contract_id="solmate-merkleproof",
+        project="solmate",
+        label="MerkleProofLib - Merkle proofs",
+        repo_path="solmate",
+        source="src/utils/MerkleProofLib.sol",
+        contract_name="MerkleProofLib",
+    ),
+    ContractConfig(
+        contract_id="solmate-create3",
+        project="solmate",
+        label="CREATE3 - Deterministic deploy",
+        repo_path="solmate",
+        source="src/utils/CREATE3.sol",
+        contract_name="CREATE3",
+    ),
+    ContractConfig(
+        contract_id="solmate-sstore2",
+        project="solmate",
+        label="SSTORE2 - Efficient storage",
+        repo_path="solmate",
+        source="src/utils/SSTORE2.sol",
+        contract_name="SSTORE2",
+    ),
+    ContractConfig(
+        contract_id="solmate-libstring",
+        project="solmate",
+        label="LibString - String utils",
+        repo_path="solmate",
+        source="src/utils/LibString.sol",
+        contract_name="LibString",
+    ),
+    ContractConfig(
+        contract_id="solmate-signedwadmath",
+        project="solmate",
+        label="SignedWadMath - Signed math",
+        repo_path="solmate",
+        source="src/utils/SignedWadMath.sol",
+        contract_name="SignedWadMath",
+    ),
+    ContractConfig(
+        contract_id="solmate-bytes32addr",
+        project="solmate",
+        label="Bytes32AddressLib - Address utils",
+        repo_path="solmate",
+        source="src/utils/Bytes32AddressLib.sol",
+        contract_name="Bytes32AddressLib",
+    ),
+)
+
+# lil-web3 contracts - minimal implementations
+# These contracts import from solmate, so need remappings
+LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
+    ContractConfig(
+        contract_id="lilweb3-ens",
+        project="lil-web3",
+        label="LilENS - Simple namespace",
+        repo_path="lil-web3",
+        source="src/LilENS.sol",
+        contract_name="LilENS",
+    ),
+    ContractConfig(
+        contract_id="lilweb3-flashloan",
+        project="lil-web3",
+        label="LilFlashloan - Flash loans",
+        repo_path="lil-web3",
+        source="src/LilFlashloan.sol",
+        contract_name="LilFlashloan",
+        remappings={"solmate/": "solmate/src/"},
+    ),
+    ContractConfig(
+        contract_id="lilweb3-fractional",
+        project="lil-web3",
+        label="LilFractional - NFT fractionalization",
+        repo_path="lil-web3",
+        source="src/LilFractional.sol",
+        contract_name="LilFractional",
+        remappings={"solmate/": "solmate/src/"},
+    ),
+    ContractConfig(
+        contract_id="lilweb3-gnosis",
+        project="lil-web3",
+        label="LilGnosis - Multisig wallet",
+        repo_path="lil-web3",
+        source="src/LilGnosis.sol",
+        contract_name="LilGnosis",
+    ),
+    ContractConfig(
+        contract_id="lilweb3-juicebox",
+        project="lil-web3",
+        label="LilJuicebox - Crowdfunding",
+        repo_path="lil-web3",
+        source="src/LilJuicebox.sol",
+        contract_name="LilJuicebox",
+        remappings={"solmate/": "solmate/src/"},
+    ),
+    ContractConfig(
+        contract_id="lilweb3-opensea",
+        project="lil-web3",
+        label="LilOpenSea - NFT marketplace",
+        repo_path="lil-web3",
+        source="src/LilOpenSea.sol",
+        contract_name="LilOpenSea",
+        remappings={"solmate/": "solmate/src/"},
+    ),
+    ContractConfig(
+        contract_id="lilweb3-superfluid",
+        project="lil-web3",
+        label="LilSuperfluid - Money streaming",
+        repo_path="lil-web3",
+        source="src/LilSuperfluid.sol",
+        contract_name="LilSuperfluid",
+        remappings={"solmate/": "solmate/src/"},
+    ),
+)
+
+# Maple Labs ERC20 - production ERC20
+MAPLE_ERC20_CONTRACTS: Sequence[ContractConfig] = (
+    ContractConfig(
+        contract_id="maple-erc20",
+        project="maple-labs",
+        label="ERC20 - Production ERC20",
+        repo_path="maple-erc20",
+        source="contracts/ERC20.sol",
+        contract_name="ERC20",
+    ),
+)
+
 # Contracts from the solidity/test/mlir directory (known to work)
 MLIR_TEST_CONTRACTS: Sequence[ContractConfig] = (
     ContractConfig(
@@ -401,8 +630,11 @@ def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]
         mid = r["mode_id"]
         by_contract.setdefault(cid, {})[mid] = r
 
-    # Calculate column widths
-    contract_width = max(len(r["label"]) for r in results) + 2
+    # Calculate column widths - include project name in display
+    def get_display_name(r: Dict[str, object]) -> str:
+        return f"{r['label']} ({r['project']})"
+
+    contract_width = max(len(get_display_name(r)) for r in results) + 2
     mode_width = max(len(m.mode_id) for m in modes) + 2
 
     # Header
@@ -418,7 +650,8 @@ def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]
     # Rows
     for cid, mode_results in by_contract.items():
         first_result = next(iter(mode_results.values()))
-        row = f"{first_result['label']:<{contract_width}}"
+        display_name = get_display_name(first_result)
+        row = f"{display_name:<{contract_width}}"
         for mode in modes:
             r = mode_results.get(mode.mode_id, {})
             status = r.get("status", "-")
@@ -530,6 +763,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Select contracts
     all_contracts: List[ContractConfig] = []
     all_contracts.extend(SECURITY_PITFALLS_CONTRACTS)
+    all_contracts.extend(SOLMATE_CONTRACTS)
+    all_contracts.extend(LIL_WEB3_CONTRACTS)
+    all_contracts.extend(MAPLE_ERC20_CONTRACTS)
 
     if args.include_mlir_tests:
         all_contracts.extend(MLIR_TEST_CONTRACTS)

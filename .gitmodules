@@ -13,3 +13,12 @@
 [submodule "aave-v3-core"]
 	path = aave-v3-core
 	url = https://github.com/aave/aave-v3-core.git
+[submodule "solmate"]
+	path = solmate
+	url = https://github.com/transmissions11/solmate.git
+[submodule "lil-web3"]
+	path = lil-web3
+	url = https://github.com/m1guelpf/lil-web3.git
+[submodule "maple-erc20"]
+	path = maple-erc20
+	url = https://github.com/maple-labs/erc20.git
