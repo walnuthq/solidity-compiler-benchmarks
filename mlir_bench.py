@@ -7,6 +7,10 @@ Tests MLIR compilation across curated contracts from target repositories:
 
 Tracks compilation success/failure and categorizes errors to identify
 CFG patterns not yet supported in the MLIR frontend.
+
+Extended features:
+- Code size comparison between solc --via-ir, solc --mlir-optimize, and solx
+- Runtime gas comparison using anvil and cast
 """
 
 from __future__ import annotations
@@ -18,15 +22,19 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Set
+from typing import Dict, List, Optional, Sequence, Tuple, Set, Any
 
 ROOT = Path(__file__).resolve().parent
 ARTIFACT_ROOT = ROOT / "mlir_artifacts"
 RESULT_ROOT = ROOT / "mlir_results"
+GAS_RESULT_ROOT = ROOT / "gas_results"
 
 # ANSI colors for CLI output
 RESET = "\033[0m"
@@ -35,8 +43,13 @@ YELLOW = "\033[33m"
 RED = "\033[31m"
 CYAN = "\033[36m"
 BOLD = "\033[1m"
+MAGENTA = "\033[35m"
 USE_COLOR = sys.stdout.isatty()
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+# Default Anvil settings
+DEFAULT_RPC_URL = "http://127.0.0.1:8545"
+DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 
 def _color(text: str, color: str) -> str:
@@ -63,6 +76,9 @@ class ContractConfig:
     # Dependencies/imports needed
     import_paths: Sequence[str] = field(default_factory=list)
     remappings: Dict[str, str] = field(default_factory=dict)
+    # Gas testing configuration
+    gas_test_calls: Sequence[Tuple[str, Sequence[str]]] = field(default_factory=list)
+    constructor_args: Sequence[str] = field(default_factory=list)
 
     def source_path(self, base_path: Optional[Path] = None) -> Path:
         """Get the full path to the source file."""
@@ -70,6 +86,18 @@ class ContractConfig:
         if not repo.is_absolute():
             repo = (base_path or ROOT) / self.repo_path
         return repo / self.source
+
+
+@dataclass
+class GasTestCase:
+    """A test case for gas benchmarking with inline source."""
+    test_id: str
+    description: str
+    source_code: str
+    contract_name: str
+    test_calls: Sequence[Tuple[str, Sequence[str]]]
+    constructor_args: Sequence[str] = field(default_factory=list)
+    constructor_sig: Optional[str] = None  # e.g., "constructor(string,string,uint8)"
 
 
 @dataclass
@@ -197,6 +225,174 @@ def detect_solc(solc_path: Optional[str] = None) -> Tuple[Optional[Path], Option
             return path, version
 
     return None, None
+
+
+def detect_solx(solx_path: Optional[str] = None) -> Tuple[Optional[Path], Optional[str]]:
+    """Find solx binary and get its version."""
+    if solx_path:
+        path = Path(solx_path)
+        if path.exists():
+            result = run([str(path), "--version"])
+            if result.returncode == 0:
+                # solx version format may differ
+                match = re.search(r"(\d+\.\d+\.\d+)", result.stdout)
+                version = match.group(1) if match else "unknown"
+                return path, version
+
+    # Try common locations
+    for candidate in ["solx", "../solx/solx", "/usr/local/bin/solx"]:
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = ROOT / candidate
+        if path.exists():
+            result = run([str(path), "--version"])
+            if result.returncode == 0:
+                match = re.search(r"(\d+\.\d+\.\d+)", result.stdout)
+                version = match.group(1) if match else "unknown"
+                return path, version
+
+    # Try system solx
+    result = run(["which", "solx"])
+    if result.returncode == 0:
+        path = Path(result.stdout.strip())
+        result = run([str(path), "--version"])
+        if result.returncode == 0:
+            match = re.search(r"(\d+\.\d+\.\d+)", result.stdout)
+            version = match.group(1) if match else "unknown"
+            return path, version
+
+    return None, None
+
+
+def check_anvil() -> bool:
+    """Check if anvil is available."""
+    result = run(["which", "anvil"])
+    return result.returncode == 0
+
+
+def check_cast() -> bool:
+    """Check if cast is available."""
+    result = run(["which", "cast"])
+    return result.returncode == 0
+
+
+def start_anvil(port: int = 8545) -> subprocess.Popen:
+    """Start an anvil instance."""
+    proc = subprocess.Popen(
+        ["anvil", "--port", str(port), "--steps-tracing"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    # Wait for anvil to start
+    time.sleep(2)
+    return proc
+
+
+def stop_anvil(proc: subprocess.Popen) -> None:
+    """Stop anvil instance."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def deploy_contract(
+    bytecode: str,
+    rpc_url: str,
+    private_key: str,
+    constructor_args: Optional[Sequence[str]] = None,
+    constructor_sig: Optional[str] = None,
+    verbose: bool = False,
+) -> Optional[str]:
+    """Deploy contract and return address."""
+    # Ensure bytecode has 0x prefix
+    if not bytecode.startswith("0x"):
+        bytecode = "0x" + bytecode
+
+    # Options must come before --create subcommand
+    cmd = [
+        "cast", "send",
+        "--rpc-url", rpc_url,
+        "--private-key", private_key,
+        "--json",
+        "--create", bytecode,
+    ]
+
+    # Add constructor signature and args if provided
+    if constructor_sig and constructor_args:
+        cmd.append(constructor_sig)
+        cmd.extend(constructor_args)
+
+    result = run(cmd, timeout=60)
+
+    if result.returncode != 0:
+        if verbose:
+            print(f"    Deploy error: {result.stderr[:200]}")
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+        return data.get("contractAddress")
+    except json.JSONDecodeError:
+        if verbose:
+            print(f"    Deploy JSON parse error: {result.stdout[:200]}")
+        return None
+
+
+def call_contract(
+    address: str,
+    signature: str,
+    args: Sequence[str],
+    rpc_url: str,
+    private_key: str,
+    verbose: bool = False,
+) -> Optional[int]:
+    """Call contract function and return gas used."""
+    cmd = [
+        "cast", "send", address, signature,
+        *args,
+        "--rpc-url", rpc_url,
+        "--private-key", private_key,
+        "--json",
+    ]
+    result = run(cmd, timeout=60)
+
+    if result.returncode != 0:
+        if verbose:
+            print(f"    Call error: {result.stderr[:200]}")
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+        gas = data.get("gasUsed")
+        # Handle hex or int format
+        if isinstance(gas, str):
+            if gas.startswith("0x"):
+                return int(gas, 16)
+            return int(gas)
+        return int(gas) if gas else None
+    except (json.JSONDecodeError, ValueError) as e:
+        if verbose:
+            print(f"    Call parse error: {e}, output: {result.stdout[:200]}")
+        return None
+
+
+def get_bytecode_from_output(output_dir: Path, contract_name: str) -> Optional[str]:
+    """Extract bytecode from compilation output directory."""
+    # Try contract-specific file first
+    bin_file = output_dir / f"{contract_name}.bin"
+    if bin_file.exists():
+        return bin_file.read_text().strip()
+
+    # Try any .bin file
+    bin_files = list(output_dir.glob("*.bin"))
+    if bin_files:
+        # Prefer the largest one (usually the main contract)
+        bin_files.sort(key=lambda f: f.stat().st_size, reverse=True)
+        return bin_files[0].read_text().strip()
+
+    return None
 
 
 def compile_contract(
@@ -515,6 +711,11 @@ LIL_WEB3_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="lil-web3",
         source="src/LilENS.sol",
         contract_name="LilENS",
+        # Gas test: register and lookup names
+        gas_test_calls=[
+            ("register(string)", ["testname"]),
+            ("lookup(string)", ["testname"]),
+        ],
     ),
     ContractConfig(
         contract_id="lilweb3-flashloan",
@@ -592,6 +793,11 @@ MLIR_TEST_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="../solidity/test/mlir",
         source="factorial.sol",
         contract_name="FactorialStorage",
+        gas_test_calls=[
+            ("computeFactorial(uint256)", ["5"]),
+            ("computeFactorial(uint256)", ["10"]),
+            ("computeFactorial(uint256)", ["20"]),
+        ],
     ),
     ContractConfig(
         contract_id="mlir-arithmetic",
@@ -618,6 +824,831 @@ MLIR_TEST_CONTRACTS: Sequence[ContractConfig] = (
         contract_name="TypeTest",
     ),
 )
+
+
+# Gas test cases with inline source code for quick benchmarking
+GAS_TEST_CASES: Sequence[GasTestCase] = (
+    GasTestCase(
+        test_id="factorial",
+        description="Factorial with storage caching opportunity",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract FactorialStorage {
+    uint256 public result;
+
+    function computeFactorial(uint256 n) external {
+        result = 1;
+        for (uint256 i = 2; i <= n; ++i) {
+            result *= i;
+        }
+    }
+
+    function getResult() external view returns (uint256) {
+        return result;
+    }
+}
+''',
+        contract_name="FactorialStorage",
+        test_calls=[
+            ("computeFactorial(uint256)", ["5"]),
+            ("computeFactorial(uint256)", ["10"]),
+            ("computeFactorial(uint256)", ["20"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="counter",
+        description="Simple counter with increment loop",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Counter {
+    uint256 public count;
+
+    function increment(uint256 times) external {
+        for (uint256 i = 0; i < times; ++i) {
+            count += 1;
+        }
+    }
+
+    function reset() external {
+        count = 0;
+    }
+}
+''',
+        contract_name="Counter",
+        test_calls=[
+            ("increment(uint256)", ["10"]),
+            ("reset()", []),
+            ("increment(uint256)", ["50"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="sum-range",
+        description="Sum computation with storage writes",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract SumStorage {
+    uint256 public total;
+
+    function sumRange(uint256 start, uint256 end) external {
+        total = 0;
+        for (uint256 i = start; i <= end; ++i) {
+            total += i;
+        }
+    }
+}
+''',
+        contract_name="SumStorage",
+        test_calls=[
+            ("sumRange(uint256,uint256)", ["1", "10"]),
+            ("sumRange(uint256,uint256)", ["1", "50"]),
+            ("sumRange(uint256,uint256)", ["1", "100"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="arithmetic",
+        description="Mixed arithmetic operations",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Arithmetic {
+    uint256 public value;
+
+    function compute(uint256 a, uint256 b, uint256 iterations) external {
+        value = a;
+        for (uint256 i = 0; i < iterations; ++i) {
+            value = (value * b + a) / 2;
+            value = value % 1000000 + 1;
+        }
+    }
+}
+''',
+        contract_name="Arithmetic",
+        test_calls=[
+            ("compute(uint256,uint256,uint256)", ["100", "3", "10"]),
+            ("compute(uint256,uint256,uint256)", ["100", "3", "50"]),
+        ],
+    ),
+    # Wrapper contracts for abstract solmate contracts
+    GasTestCase(
+        test_id="erc20-wrapper",
+        description="ERC20 token wrapper (solmate-style)",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract TestERC20 {
+    string public name;
+    string public symbol;
+    uint8 public immutable decimals;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor(string memory _name, string memory _symbol, uint8 _decimals) {
+        name = _name;
+        symbol = _symbol;
+        decimals = _decimals;
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        unchecked { balanceOf[to] += amount; }
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+        balanceOf[from] -= amount;
+        unchecked { balanceOf[to] += amount; }
+        return true;
+    }
+
+    function mint(address to, uint256 amount) public {
+        totalSupply += amount;
+        unchecked { balanceOf[to] += amount; }
+    }
+
+    function burn(address from, uint256 amount) public {
+        balanceOf[from] -= amount;
+        unchecked { totalSupply -= amount; }
+    }
+}
+''',
+        contract_name="TestERC20",
+        constructor_args=["TestToken", "TST", "18"],
+        constructor_sig="constructor(string,string,uint8)",
+        test_calls=[
+            ("mint(address,uint256)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "1000000000000000000000"]),
+            ("transfer(address,uint256)", ["0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "100000000000000000000"]),
+            ("approve(address,uint256)", ["0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", "500000000000000000000"]),
+            ("balanceOf(address)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="erc721-wrapper",
+        description="ERC721 NFT wrapper (solmate-style)",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract TestERC721 {
+    string public name;
+    string public symbol;
+    mapping(uint256 => address) internal _ownerOf;
+    mapping(address => uint256) internal _balanceOf;
+    mapping(uint256 => address) public getApproved;
+    mapping(address => mapping(address => bool)) public isApprovedForAll;
+
+    constructor(string memory _name, string memory _symbol) {
+        name = _name;
+        symbol = _symbol;
+    }
+
+    function ownerOf(uint256 id) public view returns (address owner) {
+        require((owner = _ownerOf[id]) != address(0), "NOT_MINTED");
+    }
+
+    function balanceOf(address owner) public view returns (uint256) {
+        require(owner != address(0), "ZERO_ADDRESS");
+        return _balanceOf[owner];
+    }
+
+    function approve(address spender, uint256 id) public {
+        address owner = _ownerOf[id];
+        require(msg.sender == owner || isApprovedForAll[owner][msg.sender], "NOT_AUTHORIZED");
+        getApproved[id] = spender;
+    }
+
+    function setApprovalForAll(address operator, bool approved) public {
+        isApprovedForAll[msg.sender][operator] = approved;
+    }
+
+    function transferFrom(address from, address to, uint256 id) public {
+        require(from == _ownerOf[id], "WRONG_FROM");
+        require(to != address(0), "INVALID_RECIPIENT");
+        require(
+            msg.sender == from || isApprovedForAll[from][msg.sender] || msg.sender == getApproved[id],
+            "NOT_AUTHORIZED"
+        );
+        unchecked {
+            _balanceOf[from]--;
+            _balanceOf[to]++;
+        }
+        _ownerOf[id] = to;
+        delete getApproved[id];
+    }
+
+    function mint(address to, uint256 id) public {
+        require(to != address(0), "INVALID_RECIPIENT");
+        require(_ownerOf[id] == address(0), "ALREADY_MINTED");
+        unchecked { _balanceOf[to]++; }
+        _ownerOf[id] = to;
+    }
+
+    function burn(uint256 id) public {
+        address owner = _ownerOf[id];
+        require(owner != address(0), "NOT_MINTED");
+        unchecked { _balanceOf[owner]--; }
+        delete _ownerOf[id];
+        delete getApproved[id];
+    }
+}
+''',
+        contract_name="TestERC721",
+        constructor_args=["TestNFT", "TNFT"],
+        constructor_sig="constructor(string,string)",
+        test_calls=[
+            ("mint(address,uint256)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "1"]),
+            ("mint(address,uint256)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "2"]),
+            ("mint(address,uint256)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "3"]),
+            ("approve(address,uint256)", ["0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "1"]),
+            ("transferFrom(address,address,uint256)", ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "2"]),
+            ("setApprovalForAll(address,bool)", ["0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", "true"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="weth-wrapper",
+        description="WETH wrapped ether",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract TestWETH {
+    string public name = "Wrapped Ether";
+    string public symbol = "WETH";
+    uint8 public decimals = 18;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Deposit(address indexed from, uint256 amount);
+    event Withdrawal(address indexed to, uint256 amount);
+
+    function deposit() public payable {
+        balanceOf[msg.sender] += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    function withdraw(uint256 amount) public {
+        require(balanceOf[msg.sender] >= amount);
+        balanceOf[msg.sender] -= amount;
+        payable(msg.sender).transfer(amount);
+        emit Withdrawal(msg.sender, amount);
+    }
+
+    function totalSupply() public view returns (uint256) {
+        return address(this).balance;
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        return transferFrom(msg.sender, to, amount);
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
+        if (from != msg.sender) {
+            uint256 allowed = allowance[from][msg.sender];
+            if (allowed != type(uint256).max) {
+                allowance[from][msg.sender] = allowed - amount;
+            }
+        }
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    receive() external payable {
+        deposit();
+    }
+}
+''',
+        contract_name="TestWETH",
+        test_calls=[
+            ("approve(address,uint256)", ["0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "1000000000000000000"]),
+            ("transfer(address,uint256)", ["0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "0"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="storage-patterns",
+        description="Common storage access patterns",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract StoragePatterns {
+    uint256 public counter;
+    uint256[] public values;
+    mapping(address => uint256) public balances;
+    mapping(address => mapping(address => uint256)) public allowances;
+
+    function incrementCounter(uint256 times) external {
+        for (uint256 i = 0; i < times; i++) {
+            counter++;
+        }
+    }
+
+    function pushValues(uint256 count) external {
+        for (uint256 i = 0; i < count; i++) {
+            values.push(i);
+        }
+    }
+
+    function updateBalances(address[] calldata accounts, uint256 amount) external {
+        for (uint256 i = 0; i < accounts.length; i++) {
+            balances[accounts[i]] = amount;
+        }
+    }
+
+    function batchTransfer(address from, address[] calldata tos, uint256 amount) external {
+        for (uint256 i = 0; i < tos.length; i++) {
+            balances[from] -= amount;
+            balances[tos[i]] += amount;
+        }
+    }
+}
+''',
+        contract_name="StoragePatterns",
+        test_calls=[
+            ("incrementCounter(uint256)", ["50"]),
+            ("incrementCounter(uint256)", ["100"]),
+            ("pushValues(uint256)", ["20"]),
+            ("pushValues(uint256)", ["50"]),
+        ],
+    ),
+    GasTestCase(
+        test_id="math-intensive",
+        description="Math-intensive operations",
+        source_code='''
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract MathIntensive {
+    uint256 public result;
+
+    function fibonacci(uint256 n) external {
+        if (n <= 1) {
+            result = n;
+            return;
+        }
+        uint256 a = 0;
+        uint256 b = 1;
+        for (uint256 i = 2; i <= n; i++) {
+            uint256 temp = a + b;
+            a = b;
+            b = temp;
+        }
+        result = b;
+    }
+
+    function isPrime(uint256 n) external returns (bool) {
+        if (n < 2) {
+            result = 0;
+            return false;
+        }
+        if (n == 2) {
+            result = 1;
+            return true;
+        }
+        if (n % 2 == 0) {
+            result = 0;
+            return false;
+        }
+        for (uint256 i = 3; i * i <= n; i += 2) {
+            if (n % i == 0) {
+                result = 0;
+                return false;
+            }
+        }
+        result = 1;
+        return true;
+    }
+
+    function power(uint256 base, uint256 exp) external {
+        result = 1;
+        for (uint256 i = 0; i < exp; i++) {
+            result *= base;
+        }
+    }
+
+    function gcd(uint256 a, uint256 b) external {
+        while (b != 0) {
+            uint256 temp = b;
+            b = a % b;
+            a = temp;
+        }
+        result = a;
+    }
+}
+''',
+        contract_name="MathIntensive",
+        test_calls=[
+            ("fibonacci(uint256)", ["20"]),
+            ("fibonacci(uint256)", ["50"]),
+            ("isPrime(uint256)", ["997"]),
+            ("isPrime(uint256)", ["7919"]),
+            ("power(uint256,uint256)", ["2", "10"]),
+            ("gcd(uint256,uint256)", ["48", "18"]),
+        ],
+    ),
+)
+
+
+@dataclass
+class CompilerSpec:
+    """Specification for a compiler to compare."""
+    spec_id: str
+    name: str
+    compiler_path: Path
+    flags: Sequence[str]
+    is_solx: bool = False
+
+
+def compile_with_spec(
+    spec: CompilerSpec,
+    source_path: Path,
+    output_dir: Path,
+    contract_name: str,
+    remappings: Dict[str, str] = None,
+    import_paths: Sequence[str] = None,
+    base_path: Optional[Path] = None,
+) -> Tuple[Optional[str], int, str]:
+    """Compile with a compiler spec and return (bytecode, code_size, error)."""
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [str(spec.compiler_path)]
+    cmd.extend(spec.flags)
+
+    # Add remappings
+    if remappings:
+        for name, path in remappings.items():
+            cmd.append(f"{name}={path}")
+
+    # Add include paths
+    if import_paths:
+        for inc_path in import_paths:
+            cmd.extend(["--include-path", inc_path])
+
+    # Add base path if provided
+    if base_path:
+        cmd.extend(["--base-path", str(base_path)])
+
+    # Add output options
+    cmd.extend(["--bin", "--abi", "-o", str(output_dir), "--overwrite"])
+    cmd.append(str(source_path))
+
+    result = run(cmd, timeout=120)
+
+    if result.returncode != 0:
+        return None, 0, result.stderr[:500]
+
+    # Get bytecode
+    bytecode = get_bytecode_from_output(output_dir, contract_name)
+    if not bytecode:
+        return None, 0, "No bytecode produced"
+
+    code_size = len(bytecode) // 2  # hex to bytes
+    return bytecode, code_size, ""
+
+
+def run_code_size_comparison(
+    contracts: Sequence[ContractConfig],
+    specs: Sequence[CompilerSpec],
+    base_path: Path,
+    work_dir: Path,
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """Run code size comparison across contracts and compiler specs."""
+    results = []
+
+    for contract in contracts:
+        source_path = contract.source_path(base_path)
+        if not source_path.exists():
+            continue
+
+        result_entry = {
+            "contract_id": contract.contract_id,
+            "label": contract.label,
+            "project": contract.project,
+            "sizes": {},
+        }
+
+        # Get base path for remappings
+        repo_base = Path(contract.repo_path)
+        if not repo_base.is_absolute():
+            repo_base = base_path / contract.repo_path
+
+        for spec in specs:
+            output_dir = work_dir / contract.contract_id / spec.spec_id
+            bytecode, code_size, error = compile_with_spec(
+                spec, source_path, output_dir, contract.contract_name,
+                contract.remappings, contract.import_paths, repo_base
+            )
+
+            if bytecode:
+                result_entry["sizes"][spec.spec_id] = {
+                    "size": code_size,
+                    "status": "ok",
+                }
+                if verbose:
+                    print(f"  {contract.contract_id} [{spec.spec_id}]: {code_size} bytes")
+            else:
+                result_entry["sizes"][spec.spec_id] = {
+                    "size": 0,
+                    "status": "failed",
+                    "error": error[:200],
+                }
+                if verbose:
+                    print(f"  {contract.contract_id} [{spec.spec_id}]: FAILED")
+
+        results.append(result_entry)
+
+    return results
+
+
+def run_gas_comparison(
+    test_cases: Sequence[GasTestCase],
+    specs: Sequence[CompilerSpec],
+    work_dir: Path,
+    rpc_url: str,
+    private_key: str,
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    """Run gas comparison for test cases."""
+    results = []
+
+    for test_case in test_cases:
+        if verbose:
+            print(f"\nRunning: {test_case.test_id} - {test_case.description}")
+
+        result_entry = {
+            "test_id": test_case.test_id,
+            "description": test_case.description,
+            "configs": {},
+        }
+
+        # Write source file
+        source_path = work_dir / f"{test_case.test_id}.sol"
+        source_path.write_text(test_case.source_code)
+
+        for spec in specs:
+            config_result = {
+                "compile_status": "pending",
+                "deploy_status": "pending",
+                "gas_results": [],
+                "total_gas": 0,
+                "bytecode_size": 0,
+            }
+            result_entry["configs"][spec.spec_id] = config_result
+
+            # Compile
+            output_dir = work_dir / f"{test_case.test_id}_{spec.spec_id}"
+            bytecode, code_size, error = compile_with_spec(
+                spec, source_path, output_dir, test_case.contract_name
+            )
+
+            if not bytecode:
+                config_result["compile_status"] = "failed"
+                config_result["error"] = error
+                if verbose:
+                    print(f"  [{spec.spec_id}] Compile failed: {error[:100]}")
+                continue
+
+            config_result["compile_status"] = "ok"
+            config_result["bytecode_size"] = code_size
+
+            # Deploy with constructor args if any
+            constructor_sig = None
+            constructor_args = None
+            if hasattr(test_case, 'constructor_args') and test_case.constructor_args:
+                constructor_args = list(test_case.constructor_args)
+                # Use explicit signature if provided
+                if hasattr(test_case, 'constructor_sig') and test_case.constructor_sig:
+                    constructor_sig = test_case.constructor_sig
+                else:
+                    # Infer constructor signature from args
+                    # This is a simple heuristic - complex types need explicit signatures
+                    arg_types = []
+                    for arg in constructor_args:
+                        if arg.startswith("0x") and len(arg) == 42:
+                            arg_types.append("address")
+                        elif arg.isdigit() or (arg.startswith("-") and arg[1:].isdigit()):
+                            arg_types.append("uint256")
+                        elif arg in ("true", "false"):
+                            arg_types.append("bool")
+                        else:
+                            arg_types.append("string")
+                    constructor_sig = f"constructor({','.join(arg_types)})"
+
+            address = deploy_contract(
+                bytecode, rpc_url, private_key,
+                constructor_args, constructor_sig, verbose
+            )
+            if not address:
+                config_result["deploy_status"] = "failed"
+                if verbose:
+                    print(f"  [{spec.spec_id}] Deploy failed")
+                continue
+
+            config_result["deploy_status"] = "ok"
+            config_result["address"] = address
+
+            # Run test calls
+            total_gas = 0
+            for sig, args in test_case.test_calls:
+                gas = call_contract(address, sig, args, rpc_url, private_key, verbose)
+                call_str = f"{sig}({', '.join(args)})" if args else sig
+                if gas is not None:
+                    config_result["gas_results"].append({
+                        "call": call_str,
+                        "gas": gas,
+                    })
+                    total_gas += gas
+                else:
+                    config_result["gas_results"].append({
+                        "call": call_str,
+                        "gas": None,
+                        "error": "call failed",
+                    })
+
+            config_result["total_gas"] = total_gas
+            if verbose:
+                print(f"  [{spec.spec_id}] Total gas: {total_gas:,}")
+
+        results.append(result_entry)
+
+    return results
+
+
+def print_code_size_comparison(
+    results: List[Dict[str, Any]],
+    specs: Sequence[CompilerSpec],
+) -> None:
+    """Print code size comparison table."""
+    if not results:
+        return
+
+    print("\n" + _color("=" * 100, CYAN))
+    print(_color("Code Size Comparison (bytes)", BOLD))
+    print(_color("=" * 100, CYAN))
+
+    # Header
+    contract_width = max(len(r["label"]) for r in results) + 2
+    spec_width = 15
+
+    header = f"{'Contract':<{contract_width}}"
+    for spec in specs:
+        header += f" | {spec.name:>{spec_width}}"
+    header += " | Improvement vs via-ir"
+    print(header)
+    print("-" * len(strip_ansi(header)))
+
+    # Data rows
+    for r in results:
+        row = f"{r['label']:<{contract_width}}"
+        sizes = []
+        for spec in specs:
+            size_data = r["sizes"].get(spec.spec_id, {})
+            size = size_data.get("size", 0)
+            sizes.append(size)
+            status = size_data.get("status", "unknown")
+
+            if status == "ok" and size > 0:
+                cell = f"{size:>{spec_width},}"
+            elif status == "failed":
+                cell = _color(f"{'FAILED':>{spec_width}}", RED)
+            else:
+                cell = f"{'N/A':>{spec_width}}"
+            row += f" | {cell}"
+
+        # Calculate improvement vs baseline (first spec, typically via-ir)
+        baseline = sizes[0] if sizes else 0
+        if len(sizes) >= 2 and baseline > 0:
+            # Show improvement for mlir-optimize (second spec)
+            mlir_size = sizes[1]
+            if mlir_size > 0:
+                improvement = ((baseline - mlir_size) / baseline) * 100
+                if improvement > 0:
+                    imp_str = _color(f"+{improvement:.1f}%", GREEN)
+                elif improvement < 0:
+                    imp_str = _color(f"{improvement:.1f}%", RED)
+                else:
+                    imp_str = "0.0%"
+                row += f" | {imp_str}"
+            else:
+                row += " | N/A"
+        else:
+            row += " | N/A"
+
+        print(row)
+
+    print("-" * len(strip_ansi(header)))
+
+    # Summary
+    print("\n" + _color("Summary:", BOLD))
+    for spec in specs:
+        total = sum(
+            r["sizes"].get(spec.spec_id, {}).get("size", 0)
+            for r in results
+        )
+        ok_count = sum(
+            1 for r in results
+            if r["sizes"].get(spec.spec_id, {}).get("status") == "ok"
+        )
+        print(f"  {spec.name}: {total:,} bytes total ({ok_count}/{len(results)} compiled)")
+
+
+def print_gas_comparison(
+    results: List[Dict[str, Any]],
+    specs: Sequence[CompilerSpec],
+) -> None:
+    """Print gas comparison table."""
+    if not results:
+        return
+
+    print("\n" + _color("=" * 100, CYAN))
+    print(_color("Gas Usage Comparison", BOLD))
+    print(_color("=" * 100, CYAN))
+
+    # Header
+    test_width = 25
+    spec_width = 15
+
+    header = f"{'Test Case':<{test_width}}"
+    for spec in specs:
+        header += f" | {spec.name:>{spec_width}}"
+    header += " | Improvement"
+    print(header)
+    print("-" * len(strip_ansi(header)))
+
+    # Data rows
+    for r in results:
+        row = f"{r['test_id']:<{test_width}}"
+
+        gas_values = []
+        for spec in specs:
+            cfg_result = r["configs"].get(spec.spec_id, {})
+            gas = cfg_result.get("total_gas", 0)
+            gas_values.append(gas)
+
+            if cfg_result.get("compile_status") != "ok":
+                cell = _color(f"{'COMPILE_ERR':>{spec_width}}", RED)
+            elif cfg_result.get("deploy_status") != "ok":
+                cell = _color(f"{'DEPLOY_ERR':>{spec_width}}", RED)
+            elif gas > 0:
+                cell = f"{gas:>{spec_width},}"
+            else:
+                cell = f"{'N/A':>{spec_width}}"
+
+            row += f" | {cell}"
+
+        # Calculate improvement vs baseline (first spec)
+        baseline = gas_values[0] if gas_values else 0
+        if len(gas_values) >= 2 and baseline > 0:
+            mlir_gas = gas_values[1]
+            if mlir_gas > 0:
+                improvement = ((baseline - mlir_gas) / baseline) * 100
+                if improvement > 0:
+                    imp_str = _color(f"+{improvement:.2f}%", GREEN)
+                elif improvement < 0:
+                    imp_str = _color(f"{improvement:.2f}%", RED)
+                else:
+                    imp_str = "0.00%"
+                row += f" | {imp_str}"
+            else:
+                row += " | N/A"
+        else:
+            row += " | N/A"
+
+        print(row)
+
+    print("-" * len(strip_ansi(header)))
+
+    # Summary
+    print("\n" + _color("Summary:", BOLD))
+    for spec in specs:
+        total = sum(
+            r["configs"].get(spec.spec_id, {}).get("total_gas", 0)
+            for r in results
+        )
+        print(f"  {spec.name}: {total:,} total gas")
 
 
 def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]) -> None:
@@ -745,6 +1776,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S"),
         help="Timestamp for output files",
     )
+
+    # Comparison mode arguments
+    parser.add_argument(
+        "--solx",
+        help="Path to solx binary for comparison",
+    )
+    parser.add_argument(
+        "--codesize",
+        action="store_true",
+        help="Run code size comparison between via-ir, mlir-optimize, and solx",
+    )
+    parser.add_argument(
+        "--gas",
+        action="store_true",
+        help="Run gas usage comparison (requires anvil running)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all benchmarks: compilation, code size, and gas comparison",
+    )
+    parser.add_argument(
+        "--rpc-url",
+        default=DEFAULT_RPC_URL,
+        help=f"Anvil RPC URL (default: {DEFAULT_RPC_URL})",
+    )
+    parser.add_argument(
+        "--private-key",
+        default=DEFAULT_PRIVATE_KEY,
+        help="Private key for transactions (default: anvil account 0)",
+    )
+    parser.add_argument(
+        "--start-anvil",
+        action="store_true",
+        help="Start anvil automatically for gas comparison",
+    )
+    parser.add_argument(
+        "--gas-tests",
+        nargs="*",
+        help="Subset of gas test IDs to run",
+    )
     args = parser.parse_args(argv)
 
     # Find solc
@@ -756,6 +1828,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     print(f"Using solc: {solc_path} (version: {solc_version})")
+
+    # Handle --all flag
+    if args.all:
+        args.codesize = True
+        args.gas = True
+
+    # Find solx if comparison modes requested
+    solx_path: Optional[Path] = None
+    solx_version: Optional[str] = None
+    if args.codesize or args.gas:
+        solx_path, solx_version = detect_solx(args.solx)
+        if solx_path:
+            print(f"Using solx: {solx_path} (version: {solx_version})")
+        else:
+            print(_color("Warning: solx not found, will skip solx comparison", YELLOW))
 
     # Determine base path
     base_path = Path(args.base_path) if args.base_path else ROOT
@@ -868,6 +1955,93 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     latest_csv.write_text(result_csv.read_text())
 
     print(f"\nResults saved to {result_json}")
+
+    # Run comparison modes if requested
+    comparison_results = {}
+    anvil_proc = None
+
+    try:
+        # Build compiler specs for comparison
+        if args.codesize or args.gas:
+            specs: List[CompilerSpec] = [
+                CompilerSpec(
+                    spec_id="via-ir",
+                    name="solc --via-ir",
+                    compiler_path=solc_path,
+                    flags=["--via-ir", "--optimize"],
+                ),
+                CompilerSpec(
+                    spec_id="mlir-optimize",
+                    name="solc --mlir",
+                    compiler_path=solc_path,
+                    flags=["--mlir-optimize"],
+                ),
+            ]
+            if solx_path:
+                specs.append(CompilerSpec(
+                    spec_id="solx",
+                    name="solx --via-ir",
+                    compiler_path=solx_path,
+                    flags=["--via-ir"],
+                    is_solx=True,
+                ))
+
+        # Code size comparison
+        if args.codesize:
+            print("\n" + _color("Running Code Size Comparison...", BOLD))
+            with tempfile.TemporaryDirectory() as work_dir:
+                size_results = run_code_size_comparison(
+                    all_contracts, specs, base_path, Path(work_dir), args.verbose
+                )
+                print_code_size_comparison(size_results, specs)
+                comparison_results["code_size"] = size_results
+
+        # Gas comparison
+        if args.gas:
+            # Check dependencies
+            if not check_cast():
+                print(_color("Error: 'cast' not found. Install foundry.", RED))
+                return 1
+
+            # Start anvil if requested
+            if args.start_anvil:
+                if not check_anvil():
+                    print(_color("Error: 'anvil' not found. Install foundry.", RED))
+                    return 1
+                print("\nStarting anvil...")
+                anvil_proc = start_anvil()
+
+            print("\n" + _color("Running Gas Comparison...", BOLD))
+
+            # Select gas test cases
+            if args.gas_tests:
+                test_map = {t.test_id: t for t in GAS_TEST_CASES}
+                missing = [tid for tid in args.gas_tests if tid not in test_map]
+                if missing:
+                    print(_color(f"Unknown gas test IDs: {', '.join(missing)}", RED))
+                    return 1
+                gas_test_cases = [test_map[tid] for tid in args.gas_tests]
+            else:
+                gas_test_cases = list(GAS_TEST_CASES)
+
+            with tempfile.TemporaryDirectory() as work_dir:
+                gas_results = run_gas_comparison(
+                    gas_test_cases, specs, Path(work_dir),
+                    args.rpc_url, args.private_key, args.verbose
+                )
+                print_gas_comparison(gas_results, specs)
+                comparison_results["gas"] = gas_results
+
+        # Save comparison results
+        if comparison_results:
+            comparison_json = RESULT_ROOT / f"comparison_{timestamp}.json"
+            comparison_json.write_text(json.dumps(comparison_results, indent=2, default=str))
+            print(f"\nComparison results saved to {comparison_json}")
+
+    finally:
+        if anvil_proc:
+            print("\nStopping anvil...")
+            stop_anvil(anvil_proc)
 
     # Return non-zero if any failures
     failed_count = sum(1 for r in results if r["status"] == "failed")

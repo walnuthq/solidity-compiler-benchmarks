@@ -89,30 +89,116 @@ Compiler rows currently mean the following:
 
 ### MLIR Compilation Testing (`mlir_bench.py`)
 
-Tests the MLIR compilation pipeline across contracts to identify supported/unsupported features.
+Tests the MLIR compilation pipeline across contracts to identify supported/unsupported features, with optional code size and gas usage comparisons.
+
+**Prerequisites:**
+- MLIR-enabled solc build
+- [solx](https://github.com/matter-labs/solx) (optional, for comparison)
+- [Foundry](https://getfoundry.sh/) installed (`anvil`, `cast`) for gas benchmarks
+
+#### Quick Start
 
 ```bash
-# Basic usage with custom solc path
-./mlir_bench.py --solc /path/to/mlir-enabled/solc
-
-# Test only MLIR-specific modes (skip baseline)
+# 1. Compilation tests only (default)
 ./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes
 
-# Include known-working MLIR test contracts
-./mlir_bench.py --solc ../solidity/build/solc/solc --include-mlir-tests
+# 2. Code size comparison (solc via-ir vs mlir vs solx)
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes \
+    --solx /path/to/solx --codesize
 
-# Verbose output with error details
-./mlir_bench.py --solc ../solidity/build/solc/solc --verbose
+# 3. Full benchmark: compilation + code size + gas comparison
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes \
+    --solx /path/to/solx --codesize --gas --start-anvil
 ```
 
-**Compilation Modes:**
+#### Benchmark Modes
+
+| Flag | Description |
+|------|-------------|
+| (default) | Compilation tests only - verifies MLIR pipeline works |
+| `--codesize` | Compare bytecode sizes: `solc --via-ir` vs `solc --mlir-optimize` vs `solx` |
+| `--gas` | Compare runtime gas usage (requires anvil) |
+| `--all` | Run all benchmarks (compilation + codesize + gas) |
+
+#### Examples
+
+```bash
+# Code size comparison across 30 contracts
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes \
+    --solx /path/to/solx --codesize
+
+# Example output:
+# Contract                    | solc --via-ir | solc --mlir | solx --via-ir | Improvement
+# WETH - Wrapped Ether        |         4,032 |         203 |        FAILED | +95.0%
+# LilFractional - NFT         |         5,712 |         432 |         7,501 | +92.4%
+# LilGnosis - Multisig        |         3,077 |         304 |         3,906 | +90.1%
+# Total                       |        32,945 |       5,771 |        22,321 | +82.5%
+```
+
+```bash
+# Gas comparison with auto-started anvil
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes \
+    --solx /path/to/solx --gas --start-anvil
+
+# Example output:
+# Test Case        | solc --via-ir | solc --mlir | solx --via-ir | Improvement
+# storage-patterns |     1,726,964 |     154,152 |     1,696,316 | +91.07%
+# weth-wrapper     |        70,840 |      43,963 |        70,552 | +37.94%
+# sum-range        |       145,188 |     107,711 |       115,424 | +25.81%
+# Total            |     2,465,960 |     766,944 |     2,382,098 | +68.9%
+```
+
+```bash
+# Full benchmark with all comparisons
+./mlir_bench.py --solc ../solidity/build/solc/solc --only-mlir-modes \
+    --solx /path/to/solx --all --start-anvil
+```
+
+#### Additional Options
+
+```bash
+# Verbose output with error details
+./mlir_bench.py --solc ../solidity/build/solc/solc --verbose
+
+# Test specific contracts
+./mlir_bench.py --solc ../solidity/build/solc/solc --contracts pitfalls-noaccess solmate-weth
+
+# Test specific gas benchmarks
+./mlir_bench.py --solc ../solidity/build/solc/solc --gas --start-anvil \
+    --gas-tests factorial erc20-wrapper
+
+# Use existing anvil instance
+./mlir_bench.py --solc ../solidity/build/solc/solc --gas \
+    --rpc-url http://127.0.0.1:8545
+
+# Include MLIR test contracts from solidity repo
+./mlir_bench.py --solc ../solidity/build/solc/solc --include-mlir-tests
+```
+
+#### Gas Test Cases
+
+| Test | Description |
+|------|-------------|
+| `factorial` | Storage caching optimization (loop with storage writes) |
+| `counter` | Simple increment loop |
+| `sum-range` | Range summation with storage |
+| `arithmetic` | Mixed arithmetic operations |
+| `erc20-wrapper` | ERC20 token operations (mint, transfer, approve) |
+| `erc721-wrapper` | ERC721 NFT operations (mint, transfer) |
+| `weth-wrapper` | Wrapped Ether operations |
+| `storage-patterns` | Common storage access patterns |
+| `math-intensive` | Fibonacci, prime check, power, GCD |
+
+#### Compilation Modes
+
 - `baseline` - Standard `--bin` compilation
 - `mlir-optimize` - MLIR-optimized compilation (`--mlir-optimize --bin`)
 - `mlir-print` - Print MLIR dialect (`--mlir-optimize --print-mlir`)
 - `mlir-analyze` - MLIR security analysis (`--mlir-optimize --mlir-analyze --bin`)
 - `via-ir-optimize` - Standard via-ir with optimizer
 
-**Error Categories:**
+#### Error Categories
+
 The benchmark categorizes compilation failures to track MLIR implementation gaps:
 - `mlir_type_mismatch` - Type errors in MLIR operations
 - `mlir_parent_op` - CFG/region structure issues
@@ -122,13 +208,11 @@ The benchmark categorizes compilation failures to track MLIR implementation gaps
 
 Results are saved to `mlir_results/` as JSON and CSV.
 
-### Gas Comparison (`gas_bench.py`)
+---
 
-Compares gas usage between standard and MLIR-optimized compilation.
+### Legacy Gas Comparison (`gas_bench.py`)
 
-**Prerequisites:**
-- [Foundry](https://getfoundry.sh/) installed (`anvil`, `cast`)
-- MLIR-enabled solc build
+Standalone gas comparison script (simpler, fewer test cases).
 
 ```bash
 # Start anvil and run benchmarks
@@ -140,11 +224,5 @@ Compares gas usage between standard and MLIR-optimized compilation.
 # Run specific test cases
 ./gas_bench.py --solc ../solidity/build/solc/solc --tests factorial counter
 ```
-
-**Test Cases:**
-- `factorial` - Storage caching optimization target
-- `counter` - Simple increment loop
-- `sum-array` - Range summation with storage writes
-- `arithmetic` - Mixed arithmetic operations
 
 Results show gas comparison between `via-ir --optimize` and `--mlir-optimize`.
