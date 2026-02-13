@@ -79,6 +79,7 @@ class ContractConfig:
     # Gas testing configuration
     gas_test_calls: Sequence[Tuple[str, Sequence[str]]] = field(default_factory=list)
     constructor_args: Sequence[str] = field(default_factory=list)
+    wrapper_source: Optional[str] = None  # Inline concrete wrapper for abstract contracts
 
     def source_path(self, base_path: Optional[Path] = None) -> Path:
         """Get the full path to the source file."""
@@ -423,6 +424,14 @@ def compile_contract(
         result_entry["error_message"] = f"Source file not found: {source_path}"
         return result_entry
 
+    # Use wrapper source if provided (for abstract contracts)
+    actual_source = source_path
+    if contract.wrapper_source:
+        build_dir.mkdir(parents=True, exist_ok=True)
+        wrapper_path = build_dir / f"{contract.contract_name}_wrapper.sol"
+        wrapper_path.write_text(contract.wrapper_source)
+        actual_source = wrapper_path
+
     # Build command
     cmd = [str(solc_path)]
     cmd.extend(mode.flags)
@@ -445,12 +454,12 @@ def compile_contract(
 
     # Add output directory for modes that produce files
     if mode.expects_output:
-        if build_dir.exists():
+        if build_dir.exists() and not contract.wrapper_source:
             shutil.rmtree(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
         cmd.extend(["-o", str(build_dir), "--overwrite"])
 
-    cmd.append(str(source_path))
+    cmd.append(str(actual_source))
 
     # Run compilation
     proc_result = run(cmd, timeout=120)
@@ -559,7 +568,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ERC20 - Gas-optimized ERC20",
         repo_path="solmate",
         source="src/tokens/ERC20.sol",
-        contract_name="ERC20",
+        contract_name="TestERC20",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC20} from "src/tokens/ERC20.sol";\ncontract TestERC20 is ERC20 {\n    constructor() ERC20("Test", "TST", 18) {}\n    function mint(address to, uint256 amount) external { _mint(to, amount); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-erc721",
@@ -567,7 +577,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ERC721 - Gas-optimized ERC721",
         repo_path="solmate",
         source="src/tokens/ERC721.sol",
-        contract_name="ERC721",
+        contract_name="TestERC721",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC721} from "src/tokens/ERC721.sol";\ncontract TestERC721 is ERC721 {\n    constructor() ERC721("Test", "TST") {}\n    function tokenURI(uint256) public pure override returns (string memory) { return ""; }\n    function mint(address to, uint256 id) external { _mint(to, id); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-erc1155",
@@ -575,7 +586,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ERC1155 - Gas-optimized ERC1155",
         repo_path="solmate",
         source="src/tokens/ERC1155.sol",
-        contract_name="ERC1155",
+        contract_name="TestERC1155",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC1155} from "src/tokens/ERC1155.sol";\ncontract TestERC1155 is ERC1155 {\n    function uri(uint256) public pure override returns (string memory) { return ""; }\n    function mint(address to, uint256 id, uint256 amount) external { _mint(to, id, amount, ""); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-erc4626",
@@ -583,7 +595,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ERC4626 - Tokenized vault",
         repo_path="solmate",
         source="src/tokens/ERC4626.sol",
-        contract_name="ERC4626",
+        contract_name="TestERC4626",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC20} from "src/tokens/ERC20.sol";\nimport {ERC4626} from "src/tokens/ERC4626.sol";\ncontract MockERC20 is ERC20 {\n    constructor() ERC20("Asset", "AST", 18) {}\n    function mint(address to, uint256 amount) external { _mint(to, amount); }\n}\ncontract TestERC4626 is ERC4626 {\n    constructor(ERC20 asset) ERC4626(asset, "Vault", "VLT") {}\n    function totalAssets() public view override returns (uint256) { return asset.balanceOf(address(this)); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-erc6909",
@@ -591,7 +604,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ERC6909 - Multi-token",
         repo_path="solmate",
         source="src/tokens/ERC6909.sol",
-        contract_name="ERC6909",
+        contract_name="TestERC6909",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC6909} from "src/tokens/ERC6909.sol";\ncontract TestERC6909 is ERC6909 {\n    function mint(address to, uint256 id, uint256 amount) external { _mint(to, id, amount); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-weth",
@@ -608,7 +622,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="Owned - Simple ownership",
         repo_path="solmate",
         source="src/auth/Owned.sol",
-        contract_name="Owned",
+        contract_name="TestOwned",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {Owned} from "src/auth/Owned.sol";\ncontract TestOwned is Owned(msg.sender) {}\n',
     ),
     ContractConfig(
         contract_id="solmate-auth",
@@ -616,7 +631,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="Auth - Flexible authority",
         repo_path="solmate",
         source="src/auth/Auth.sol",
-        contract_name="Auth",
+        contract_name="TestAuth",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {Auth, Authority} from "src/auth/Auth.sol";\ncontract TestAuth is Auth(msg.sender, Authority(address(0))) {}\n',
     ),
     # Utils
     ContractConfig(
@@ -649,7 +665,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="ReentrancyGuard - Reentrancy protection",
         repo_path="solmate",
         source="src/utils/ReentrancyGuard.sol",
-        contract_name="ReentrancyGuard",
+        contract_name="TestReentrancyGuard",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ReentrancyGuard} from "src/utils/ReentrancyGuard.sol";\ncontract TestReentrancyGuard is ReentrancyGuard {\n    uint256 public value;\n    function protected() external nonReentrant { value = 1; }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-merkleproof",
@@ -689,7 +706,8 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         label="SignedWadMath - Signed math",
         repo_path="solmate",
         source="src/utils/SignedWadMath.sol",
-        contract_name="SignedWadMath",
+        contract_name="TestSignedWadMath",
+        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport "src/utils/SignedWadMath.sol";\ncontract TestSignedWadMath {\n    function testWadMul(int256 x, int256 y) external pure returns (int256) { return wadMul(x, y); }\n    function testWadDiv(int256 x, int256 y) external pure returns (int256) { return wadDiv(x, y); }\n    function testWadExp(int256 x) external pure returns (int256) { return wadExp(x); }\n    function testWadLn(int256 x) external pure returns (int256) { return wadLn(x); }\n}\n',
     ),
     ContractConfig(
         contract_id="solmate-bytes32addr",
@@ -1287,11 +1305,19 @@ def compile_with_spec(
     remappings: Dict[str, str] = None,
     import_paths: Sequence[str] = None,
     base_path: Optional[Path] = None,
+    wrapper_source: Optional[str] = None,
 ) -> Tuple[Optional[str], int, str]:
     """Compile with a compiler spec and return (bytecode, code_size, error)."""
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use wrapper source if provided (for abstract contracts)
+    actual_source = source_path
+    if wrapper_source:
+        wrapper_path = output_dir / f"{contract_name}_wrapper.sol"
+        wrapper_path.write_text(wrapper_source)
+        actual_source = wrapper_path
 
     cmd = [str(spec.compiler_path)]
     cmd.extend(spec.flags)
@@ -1312,7 +1338,7 @@ def compile_with_spec(
 
     # Add output options
     cmd.extend(["--bin", "--abi", "-o", str(output_dir), "--overwrite"])
-    cmd.append(str(source_path))
+    cmd.append(str(actual_source))
 
     result = run(cmd, timeout=120)
 
@@ -1359,7 +1385,8 @@ def run_code_size_comparison(
             output_dir = work_dir / contract.contract_id / spec.spec_id
             bytecode, code_size, error = compile_with_spec(
                 spec, source_path, output_dir, contract.contract_name,
-                contract.remappings, contract.import_paths, repo_base
+                contract.remappings, contract.import_paths, repo_base,
+                contract.wrapper_source
             )
 
             if bytecode:
