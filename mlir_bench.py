@@ -597,7 +597,39 @@ SOLMATE_CONTRACTS: Sequence[ContractConfig] = (
         repo_path="solmate",
         source="src/tokens/ERC1155.sol",
         contract_name="TestERC1155",
-        wrapper_source='// SPDX-License-Identifier: AGPL-3.0-only\npragma solidity >=0.8.0;\nimport {ERC1155} from "src/tokens/ERC1155.sol";\ncontract TestERC1155 is ERC1155 {\n    function uri(uint256) public pure override returns (string memory) { return ""; }\n    function mint(address to, uint256 id, uint256 amount) external { _mint(to, id, amount, ""); }\n}\n',
+        wrapper_source=('// SPDX-License-Identifier: AGPL-3.0-only\n'
+            'pragma solidity >=0.8.0;\n'
+            'import {ERC1155} from "src/tokens/ERC1155.sol";\n'
+            'contract TestERC1155 is ERC1155 {\n'
+            '    function uri(uint256) public pure override returns (string memory) { return ""; }\n'
+            '    // Override functions that use patterns unsupported by the MLIR pipeline\n'
+            '    // (external interface calls, .selector, new array creation)\n'
+            '    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata) public override {\n'
+            '        require(msg.sender == from || isApprovedForAll[from][msg.sender], "NOT_AUTHORIZED");\n'
+            '        balanceOf[from][id] -= amount;\n'
+            '        balanceOf[to][id] += amount;\n'
+            '        emit TransferSingle(msg.sender, from, to, id, amount);\n'
+            '    }\n'
+            '    function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amounts, bytes calldata) public override {\n'
+            '        require(ids.length == amounts.length, "LENGTH_MISMATCH");\n'
+            '        require(msg.sender == from || isApprovedForAll[from][msg.sender], "NOT_AUTHORIZED");\n'
+            '        for (uint256 i = 0; i < ids.length; ) { balanceOf[from][ids[i]] -= amounts[i]; balanceOf[to][ids[i]] += amounts[i]; unchecked { ++i; } }\n'
+            '        emit TransferBatch(msg.sender, from, to, ids, amounts);\n'
+            '    }\n'
+            '    function _mint(address to, uint256 id, uint256 amount, bytes memory) internal override {\n'
+            '        balanceOf[to][id] += amount;\n'
+            '        emit TransferSingle(msg.sender, address(0), to, id, amount);\n'
+            '    }\n'
+            '    function _batchMint(address to, uint256[] memory ids, uint256[] memory amounts, bytes memory) internal override {\n'
+            '        require(ids.length == amounts.length, "LENGTH_MISMATCH");\n'
+            '        for (uint256 i = 0; i < ids.length; ) { balanceOf[to][ids[i]] += amounts[i]; unchecked { ++i; } }\n'
+            '        emit TransferBatch(msg.sender, address(0), to, ids, amounts);\n'
+            '    }\n'
+            '    function balanceOfBatch(address[] calldata, uint256[] calldata) public pure override returns (uint256[] memory) {\n'
+            '        revert("not supported");\n'
+            '    }\n'
+            '    function mint(address to, uint256 id, uint256 amount) external { _mint(to, id, amount, ""); }\n'
+            '}\n'),
     ),
     ContractConfig(
         contract_id="solmate-erc4626",
