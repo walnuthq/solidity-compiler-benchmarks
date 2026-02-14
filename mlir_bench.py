@@ -311,6 +311,21 @@ def deploy_contract(
     if not bytecode.startswith("0x"):
         bytecode = "0x" + bytecode
 
+    # ABI-encode constructor args and append to bytecode directly.
+    # Using cast's --create with a constructor signature can misbehave
+    # with some compiler outputs, so we encode manually.
+    if constructor_sig and constructor_args:
+        encode_cmd = ["cast", "abi-encode", constructor_sig] + list(constructor_args)
+        encode_result = run(encode_cmd, timeout=30)
+        if encode_result.returncode == 0:
+            encoded = encode_result.stdout.strip()
+            # Remove 0x prefix from encoded args before appending
+            if encoded.startswith("0x"):
+                encoded = encoded[2:]
+            bytecode = bytecode + encoded
+        elif verbose:
+            print(f"    ABI encode error: {encode_result.stderr[:200]}")
+
     # Options must come before --create subcommand
     cmd = [
         "cast", "send",
@@ -319,11 +334,6 @@ def deploy_contract(
         "--json",
         "--create", bytecode,
     ]
-
-    # Add constructor signature and args if provided
-    if constructor_sig and constructor_args:
-        cmd.append(constructor_sig)
-        cmd.extend(constructor_args)
 
     result = run(cmd, timeout=60)
 
