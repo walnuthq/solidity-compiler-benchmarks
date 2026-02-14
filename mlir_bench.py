@@ -181,9 +181,14 @@ def run(cmd: Sequence[str], cwd: Optional[Path] = None,
         timeout: int = 120) -> subprocess.CompletedProcess[str]:
     """Run a command and capture output."""
     try:
-        return subprocess.run(
+        result = subprocess.run(
             cmd, cwd=cwd, check=False, capture_output=True,
-            text=True, timeout=timeout
+            timeout=timeout
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode,
+            stdout=result.stdout.decode('utf-8', errors='replace'),
+            stderr=result.stderr.decode('utf-8', errors='replace'),
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
@@ -487,6 +492,11 @@ def compile_contract(
 
     # Success - check output
     result_entry["status"] = "ok"
+
+    # Parse MLIR unsupported feature drop count from stderr (sum across all contracts in unit)
+    drop_matches = re.findall(r"\[MLIR\]\s+\S+:\s+(\d+)\s+unsupported", proc_result.stderr)
+    if drop_matches:
+        result_entry["mlir_drops"] = sum(int(n) for n in drop_matches)
 
     if mode.mode_id == "mlir-print":
         # MLIR output goes to stderr
@@ -1756,7 +1766,11 @@ def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]
             r = mode_results.get(mode.mode_id, {})
             status = r.get("status", "-")
             if status == "ok":
-                cell = _color("OK", GREEN)
+                drops = r.get("mlir_drops", 0)
+                if drops > 0:
+                    cell = _color("OK", GREEN) + _color(f" ({drops} drops)", YELLOW)
+                else:
+                    cell = _color("OK", GREEN)
             elif status == "failed":
                 cell = _color("FAILED", RED)
             elif status == "source_not_found":
