@@ -498,6 +498,11 @@ def compile_contract(
     if drop_matches:
         result_entry["mlir_drops"] = sum(int(n) for n in drop_matches)
 
+    # Parse MLIR codegen warning count from stderr
+    codegen_matches = re.findall(r"\[MLIR\]\s+\S+:\s+(\d+)\s+codegen warning", proc_result.stderr)
+    if codegen_matches:
+        result_entry["mlir_codegen_warnings"] = sum(int(n) for n in codegen_matches)
+
     if mode.mode_id == "mlir-print":
         # MLIR output goes to stderr
         result_entry["mlir_output"] = proc_result.stderr[:5000]
@@ -1767,8 +1772,13 @@ def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]
             status = r.get("status", "-")
             if status == "ok":
                 drops = r.get("mlir_drops", 0)
-                if drops > 0:
+                cg_warns = r.get("mlir_codegen_warnings", 0)
+                if drops > 0 and cg_warns > 0:
+                    cell = _color("OK", GREEN) + _color(f" ({drops}d/{cg_warns}w)", YELLOW)
+                elif drops > 0:
                     cell = _color("OK", GREEN) + _color(f" ({drops} drops)", YELLOW)
+                elif cg_warns > 0:
+                    cell = _color("OK", GREEN) + _color(f" ({cg_warns} warns)", YELLOW)
                 else:
                     cell = _color("OK", GREEN)
             elif status == "failed":
@@ -1788,8 +1798,13 @@ def print_summary(results: List[Dict[str, object]], modes: Sequence[CompileMode]
     failed = sum(1 for r in results if r["status"] == "failed")
     other = total - ok - failed
 
+    total_drops = sum(r.get("mlir_drops", 0) for r in results)
+    total_cg_warns = sum(r.get("mlir_codegen_warnings", 0) for r in results)
+
     print(f"\nTotal: {total} | {_color(f'OK: {ok}', GREEN)} | "
           f"{_color(f'Failed: {failed}', RED)} | Other: {other}")
+    if total_drops > 0 or total_cg_warns > 0:
+        print(f"  Drops: {total_drops} | Codegen warnings: {total_cg_warns}")
 
     # Print failures with errors and reproduction commands
     failures = [r for r in results if r["status"] == "failed"]
