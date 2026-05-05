@@ -99,6 +99,24 @@ def binary_version(path: Path) -> Tuple[str, str]:
     return version, ""
 
 
+def parse_version_tuple(version: str) -> Optional[Tuple[int, int, int]]:
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def version_in_range(version: str, minimum: Optional[str], maximum: Optional[str]) -> bool:
+    parsed = parse_version_tuple(version)
+    if parsed is None:
+        return True
+    if minimum and parsed < parse_version_tuple(minimum):
+        return False
+    if maximum and parsed > parse_version_tuple(maximum):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class CompilerSpec:
     compiler_id: str
@@ -120,6 +138,8 @@ class SourceCase:
     test_calls: Sequence[Tuple[str, Sequence[str]]] = field(default_factory=tuple)
     constructor_args: Sequence[str] = field(default_factory=tuple)
     constructor_sig: Optional[str] = None
+    min_solc: Optional[str] = None
+    max_solc: Optional[str] = None
 
     @property
     def source_path(self) -> Path:
@@ -138,6 +158,8 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="v2-core",
         source="contracts/UniswapV2Pair.sol",
         contract_name="UniswapV2Pair",
+        min_solc="0.5.16",
+        max_solc="0.5.16",
     ),
     SourceCase(
         test_id="openzeppelin-erc20-mock",
@@ -676,6 +698,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--tests", nargs="*", help="Subset of test IDs to run")
     parser.add_argument("--projects", nargs="*", help="Subset of repository project names to run")
     parser.add_argument("--list-tests", action="store_true", help="List available tests and exit")
+    parser.add_argument(
+        "--include-incompatible",
+        action="store_true",
+        help="Run repo contracts even when their pragma is incompatible with the selected solc",
+    )
     parser.add_argument("--gas", action="store_true", help="Deploy and execute gas test calls with cast/anvil")
     parser.add_argument("--start-anvil", action="store_true", help="Start anvil automatically for --gas")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help=f"RPC URL (default: {DEFAULT_RPC_URL})")
@@ -757,6 +784,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         tests = list(all_tests)
 
+    skipped = []
+    if not args.include_incompatible:
+        compatible_tests = []
+        for test in tests:
+            if isinstance(test, SourceCase) and not version_in_range(solc_version, test.min_solc, test.max_solc):
+                skipped.append(test)
+            else:
+                compatible_tests.append(test)
+        tests = compatible_tests
+
     if args.gas and any(isinstance(test, SourceCase) and not test.test_calls for test in tests):
         print(_color("repo contracts without gas calls will show N/A in the gas table", YELLOW), file=sys.stderr)
 
@@ -773,6 +810,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Using {specs[1].label}")
     if solar_version_error:
         print(_color(f"Warning: `solar --version` failed: {solar_version_error}", YELLOW), file=sys.stderr)
+    if skipped:
+        skipped_ids = ", ".join(test.test_id for test in skipped)
+        print(_color(f"Skipping {len(skipped)} incompatible tests for solc {solc_version}: {skipped_ids}", YELLOW))
     print(f"Running {len(tests)} tests")
 
     try:

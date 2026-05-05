@@ -76,6 +76,8 @@ git submodule update --init --recursive
 ./solar_bench.py --solar ../solar/target/debug/solar --suite repo
 ```
 
+Known pragma-incompatible repository tests are skipped by default for the selected `solc`. Pass `--include-incompatible` to keep them in the run while debugging older Solidity support.
+
 Run one repository project or contract:
 
 ```bash
