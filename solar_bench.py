@@ -9,8 +9,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -45,7 +46,12 @@ def pad_cell(text: str, width: int) -> str:
     return text + " " * max(0, width - visible_len(text))
 
 
-def run(cmd: Sequence[str], input_text: Optional[str] = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: Sequence[str],
+    input_text: Optional[str] = None,
+    timeout: int = 120,
+    cwd: Optional[Path] = None,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             cmd,
@@ -54,6 +60,7 @@ def run(cmd: Sequence[str], input_text: Optional[str] = None, timeout: int = 120
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(cmd, -1, "", "TIMEOUT")
@@ -98,6 +105,108 @@ class CompilerSpec:
     label: str
     path: Path
     kind: str
+
+
+@dataclass(frozen=True)
+class SourceCase:
+    test_id: str
+    description: str
+    project: str
+    repo: str
+    source: str
+    contract_name: str
+    import_paths: Sequence[str] = field(default_factory=tuple)
+    remappings: Sequence[str] = field(default_factory=tuple)
+    test_calls: Sequence[Tuple[str, Sequence[str]]] = field(default_factory=tuple)
+    constructor_args: Sequence[str] = field(default_factory=tuple)
+    constructor_sig: Optional[str] = None
+
+    @property
+    def source_path(self) -> Path:
+        return ROOT / self.repo / self.source
+
+    @property
+    def repo_path(self) -> Path:
+        return ROOT / self.repo
+
+
+REPO_TEST_CASES: Sequence[SourceCase] = (
+    SourceCase(
+        test_id="uniswap-v2-pair",
+        description="Uniswap V2 Pair",
+        project="v2-core",
+        repo="v2-core",
+        source="contracts/UniswapV2Pair.sol",
+        contract_name="UniswapV2Pair",
+    ),
+    SourceCase(
+        test_id="openzeppelin-erc20-mock",
+        description="OpenZeppelin ERC20Mock",
+        project="openzeppelin-contracts",
+        repo="openzeppelin-contracts",
+        source="contracts/mocks/token/ERC20Mock.sol",
+        contract_name="ERC20Mock",
+    ),
+    SourceCase(
+        test_id="openzeppelin-vesting-wallet",
+        description="OpenZeppelin VestingWallet",
+        project="openzeppelin-contracts",
+        repo="openzeppelin-contracts",
+        source="contracts/finance/VestingWallet.sol",
+        contract_name="VestingWallet",
+    ),
+    SourceCase(
+        test_id="nitro-one-step-proof",
+        description="Nitro OneStepProofEntry",
+        project="nitro-contracts",
+        repo="nitro-contracts",
+        source="src/osp/OneStepProofEntry.sol",
+        contract_name="OneStepProofEntry",
+    ),
+    SourceCase(
+        test_id="aave-l2-encoder",
+        description="Aave V3 L2Encoder",
+        project="aave-v3-core",
+        repo="aave-v3-core",
+        source="contracts/misc/L2Encoder.sol",
+        contract_name="L2Encoder",
+    ),
+    SourceCase(
+        test_id="lilweb3-ens",
+        description="LilENS",
+        project="lil-web3",
+        repo="lil-web3",
+        source="src/LilENS.sol",
+        contract_name="LilENS",
+        test_calls=(("register(string)", ("testname",)), ("lookup(string)", ("testname",))),
+    ),
+    SourceCase(
+        test_id="lilweb3-flashloan",
+        description="LilFlashloan",
+        project="lil-web3",
+        repo="lil-web3",
+        source="src/LilFlashloan.sol",
+        contract_name="LilFlashloan",
+        remappings=("solmate/=lib/solmate/src/",),
+    ),
+    SourceCase(
+        test_id="lilweb3-fractional",
+        description="LilFractional",
+        project="lil-web3",
+        repo="lil-web3",
+        source="src/LilFractional.sol",
+        contract_name="LilFractional",
+        remappings=("solmate/=lib/solmate/src/",),
+    ),
+    SourceCase(
+        test_id="maple-erc20",
+        description="Maple ERC20",
+        project="maple-erc20",
+        repo="maple-erc20",
+        source="contracts/ERC20.sol",
+        contract_name="ERC20",
+    ),
+)
 
 
 def standard_json_input(test_case: TestCase) -> str:
@@ -181,6 +290,140 @@ def compile_standard_json(spec: CompilerSpec, test_case: TestCase) -> Dict[str, 
         result["status"] = "failed"
         result["error"] = error
         return result
+
+    result["status"] = "ok"
+    result["bytecode"] = bytecode
+    result["runtime_bytecode"] = runtime or ""
+    result["bytecode_size"] = len(bytecode) // 2
+    result["runtime_size"] = len(runtime or "") // 2
+    return result
+
+
+def parse_solar_cli_output(stdout: str, case: SourceCase) -> Tuple[Optional[str], Optional[str], str]:
+    decoder = json.JSONDecoder()
+    objects = []
+    idx = 0
+    while idx < len(stdout):
+        while idx < len(stdout) and stdout[idx].isspace():
+            idx += 1
+        if idx >= len(stdout):
+            break
+        try:
+            obj, idx = decoder.raw_decode(stdout, idx)
+        except json.JSONDecodeError as exc:
+            return None, None, f"invalid JSON output: {exc}"
+        if isinstance(obj, dict):
+            objects.append(obj)
+
+    output = next((obj for obj in reversed(objects) if obj.get("contracts")), {})
+    if not output:
+        return None, None, "no contracts in JSON output"
+
+    errors = output.get("errors") or []
+    fatal = [
+        err.get("formattedMessage") or err.get("message") or str(err)
+        for err in errors
+        if err.get("severity") == "error"
+    ]
+    if fatal:
+        return None, None, fatal[0][:1000]
+
+    contracts = output.get("contracts") or {}
+    for key, contract in contracts.items():
+        if key == case.contract_name or key.endswith(f":{case.contract_name}"):
+            bytecode = str(contract.get("bin") or "").strip()
+            runtime = str(contract.get("bin-runtime") or contract.get("bin_runtime") or "").strip()
+            if bytecode:
+                return bytecode, runtime, ""
+
+    available = ", ".join(str(key) for key in contracts.keys())
+    return None, None, f"contract {case.contract_name} not found; available: {available}"
+
+
+def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]:
+    result = {
+        "compiler_id": spec.compiler_id,
+        "label": spec.label,
+        "status": "pending",
+        "bytecode": "",
+        "runtime_bytecode": "",
+        "bytecode_size": 0,
+        "runtime_size": 0,
+        "error": "",
+        "source": str(case.source_path.relative_to(ROOT)),
+        "project": case.project,
+    }
+
+    if not case.source_path.exists():
+        result["status"] = "failed"
+        result["error"] = (
+            f"source not found: {case.source_path.relative_to(ROOT)}; "
+            "run `git submodule update --init --recursive`"
+        )
+        return result
+
+    with tempfile.TemporaryDirectory(prefix="solar-bench-") as tmp:
+        out_dir = Path(tmp) / spec.compiler_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if spec.kind == "solc":
+            cmd = [
+                str(spec.path),
+                "--via-ir",
+                "--optimize",
+                "--bin",
+                "--bin-runtime",
+                "--abi",
+                "--base-path",
+                str(case.repo_path),
+                "--overwrite",
+                "-o",
+                str(out_dir),
+            ]
+            for import_path in case.import_paths:
+                cmd.extend(["--include-path", import_path])
+            cmd.extend(case.remappings)
+            cmd.append(case.source)
+            proc = run(cmd, timeout=180, cwd=case.repo_path)
+            result["command"] = " ".join(cmd)
+            if proc.returncode != 0:
+                result["status"] = "failed"
+                result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
+                return result
+
+            bytecode_path = out_dir / f"{case.contract_name}.bin"
+            runtime_path = out_dir / f"{case.contract_name}.bin-runtime"
+            if not bytecode_path.exists():
+                result["status"] = "failed"
+                result["error"] = f"{bytecode_path.name} was not produced"
+                return result
+            bytecode = bytecode_path.read_text().strip()
+            runtime = runtime_path.read_text().strip() if runtime_path.exists() else ""
+        else:
+            cmd = [
+                str(spec.path),
+                "--emit",
+                "abi,bin,bin-runtime",
+                "--base-path",
+                str(case.repo_path),
+                "--color",
+                "never",
+            ]
+            for import_path in case.import_paths:
+                cmd.extend(["-I", import_path])
+            cmd.extend(case.remappings)
+            cmd.append(case.source)
+            proc = run(cmd, timeout=180, cwd=case.repo_path)
+            result["command"] = " ".join(cmd)
+            if proc.returncode != 0:
+                result["status"] = "failed"
+                result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
+                return result
+            bytecode, runtime, error = parse_solar_cli_output(proc.stdout, case)
+            if not bytecode:
+                result["status"] = "failed"
+                result["error"] = error
+                return result
 
     result["status"] = "ok"
     result["bytecode"] = bytecode
@@ -297,7 +540,7 @@ def call_contract(
 
 
 def run_test_case(
-    test_case: TestCase,
+    test_case: TestCase | SourceCase,
     specs: Sequence[CompilerSpec],
     include_gas: bool,
     rpc_url: str,
@@ -307,11 +550,19 @@ def run_test_case(
         "test_id": test_case.test_id,
         "description": test_case.description,
         "contract_name": test_case.contract_name,
+        "suite": "repo" if isinstance(test_case, SourceCase) else "micro",
         "compilers": {},
     }
+    if isinstance(test_case, SourceCase):
+        entry["project"] = test_case.project
+        entry["source"] = str(test_case.source_path.relative_to(ROOT))
 
     for spec in specs:
-        compiled = compile_standard_json(spec, test_case)
+        compiled = (
+            compile_repo_case(spec, test_case)
+            if isinstance(test_case, SourceCase)
+            else compile_standard_json(spec, test_case)
+        )
         compiler_entry = dict(compiled)
         compiler_entry.pop("bytecode", None)
         entry["compilers"][spec.compiler_id] = compiler_entry
@@ -358,7 +609,8 @@ def pct_delta(old: int, new: int) -> str:
 
 def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[CompilerSpec]) -> None:
     print("\n" + _color("Code Size Comparison", BOLD))
-    header = f"{'Test':<22}"
+    test_width = max(22, *(visible_len(str(result["test_id"])) for result in results)) if results else 22
+    header = f"{'Test':<{test_width}}"
     for spec in specs:
         header += f" | {spec.compiler_id:<13}"
     header += " | Solar vs solc"
@@ -366,7 +618,7 @@ def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[Compi
     print("-" * len(header))
 
     for result in results:
-        row = f"{str(result['test_id']):<22}"
+        row = f"{str(result['test_id']):<{test_width}}"
         sizes = []
         for spec in specs:
             data = result["compilers"].get(spec.compiler_id, {})
@@ -383,7 +635,8 @@ def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[Compi
 
 def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[CompilerSpec]) -> None:
     print("\n" + _color("Gas Comparison", BOLD))
-    header = f"{'Test':<22}"
+    test_width = max(22, *(visible_len(str(result["test_id"])) for result in results)) if results else 22
+    header = f"{'Test':<{test_width}}"
     for spec in specs:
         header += f" | {spec.compiler_id:<13}"
     header += " | Solar vs solc"
@@ -391,7 +644,7 @@ def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[Compil
     print("-" * len(header))
 
     for result in results:
-        row = f"{str(result['test_id']):<22}"
+        row = f"{str(result['test_id']):<{test_width}}"
         totals = []
         for spec in specs:
             data = result["compilers"].get(spec.compiler_id, {})
@@ -412,14 +665,17 @@ def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[Compil
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Benchmark solc vs Solar codegen using standard-json output"
+        description="Benchmark solc vs Solar codegen on inline and repository contracts"
     )
     parser.add_argument("--solc", default="solc", help="Path to solc binary (default: solc)")
     parser.add_argument(
         "--solar",
         help="Path to solar binary (default: solar, ../solar/target/release/solar, ../solar/target/debug/solar)",
     )
+    parser.add_argument("--suite", choices=("micro", "repo", "all"), default="micro", help="Benchmark suite to run")
     parser.add_argument("--tests", nargs="*", help="Subset of test IDs to run")
+    parser.add_argument("--projects", nargs="*", help="Subset of repository project names to run")
+    parser.add_argument("--list-tests", action="store_true", help="List available tests and exit")
     parser.add_argument("--gas", action="store_true", help="Deploy and execute gas test calls with cast/anvil")
     parser.add_argument("--start-anvil", action="store_true", help="Start anvil automatically for --gas")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help=f"RPC URL (default: {DEFAULT_RPC_URL})")
@@ -432,6 +688,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Exit successfully even if a compiler fails for one or more tests",
     )
     args = parser.parse_args(argv)
+
+    all_tests = []
+    if args.suite in ("micro", "all"):
+        all_tests.extend(TEST_CASES)
+    if args.suite in ("repo", "all"):
+        all_tests.extend(REPO_TEST_CASES)
+
+    if args.projects:
+        project_set = set(args.projects)
+        all_tests = [
+            test for test in all_tests
+            if isinstance(test, SourceCase) and test.project in project_set
+        ]
+
+    test_map = {test.test_id: test for test in all_tests}
+    if args.list_tests:
+        for test in all_tests:
+            if isinstance(test, SourceCase):
+                print(f"{test.test_id}	{test.project}	{test.source}	{test.contract_name}")
+            else:
+                print(f"{test.test_id}	micro	inline	{test.contract_name}")
+        return 0
 
     solc = find_binary(args.solc, ["solc"])
     if not solc:
@@ -470,7 +748,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         CompilerSpec("solar", f"solar {solar_version}", solar, "solar"),
     ]
 
-    test_map = {test.test_id: test for test in TEST_CASES}
     if args.tests:
         missing = [test_id for test_id in args.tests if test_id not in test_map]
         if missing:
@@ -478,7 +755,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         tests = [test_map[test_id] for test_id in args.tests]
     else:
-        tests = list(TEST_CASES)
+        tests = list(all_tests)
+
+    if args.gas and any(isinstance(test, SourceCase) and not test.test_calls for test in tests):
+        print(_color("repo contracts without gas calls will show N/A in the gas table", YELLOW), file=sys.stderr)
 
     print(f"Using {specs[0].label}")
     if solc_version_error:

@@ -63,6 +63,26 @@ Run a subset:
 ./solar_bench.py --solar ../solar/target/debug/solar --tests counter arithmetic
 ```
 
+List available inline and repository tests:
+
+```bash
+./solar_bench.py --suite all --list-tests
+```
+
+Run the repository contract corpus. Initialize submodules first because these contracts live in `aave-v3-core`, `lil-web3`, `maple-erc20`, `nitro-contracts`, `openzeppelin-contracts`, and `v2-core`:
+
+```bash
+git submodule update --init --recursive
+./solar_bench.py --solar ../solar/target/debug/solar --suite repo
+```
+
+Run one repository project or contract:
+
+```bash
+./solar_bench.py --solar ../solar/target/debug/solar --suite repo --projects openzeppelin-contracts
+./solar_bench.py --solar ../solar/target/debug/solar --suite repo --tests aave-l2-encoder maple-erc20
+```
+
 Run gas comparison with a managed Anvil instance:
 
 ```bash
