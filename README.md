@@ -1,14 +1,15 @@
 # Solidity Compiler Benchmark
 
-This repository collects a handful of well-known Solidity contracts and scripts to evaluate compilers in many aspects:
+This repository collects Solidity contracts and scripts to evaluate compilers in many aspects:
 
+- **Solar vs solc codegen** (`solar_bench.py`) - Compares Solar and solc bytecode size, with optional gas execution
 - **ETHDebug coverage** (`bench.py`) - Evaluates quality of debug information
 - **MLIR compilation testing** (`mlir_bench.py`) - Tests MLIR pipeline compatibility
 - **Gas comparison** (`gas_bench.py`) - Compares gas usage between compiler configurations
 
-Currently, it runs the [`ethdebug-stats`](https://github.com/walnuthq/ethdebug-stats) analyzer against those popular contracts and it is designed to answer questions such as “how good are the source mappings for Uniswap, Aave, or Offchain Labs contracts when compiled with a given compiler build?”
+The primary workflow is now `solar_bench.py`, which compares solc and Solar codegen on the same contracts. The older scripts remain available for ETHDebug coverage and legacy MLIR experiments.
 
-An example:
+An ETHDebug coverage example:
 
 ```bash
 ./bench.py --compilers solc-0.8.30 solc-0.8.30-legacy solc-0.8.28 solx solar
@@ -32,8 +33,61 @@ Variable Location Coverage Averages:
 
 > Note: this repo pulls upstream contracts via git submodules. Clone with --recurse-submodules (or run git submodule update --init --recursive) before running the benchmark.
 
+## Solar vs solc
 
-## Running the benchmark
+`solar_bench.py` is the main benchmark for comparing Solar codegen against solc. It compiles both compilers through standard-json, reports deployed bytecode size by default, and can optionally deploy the contracts to Anvil and execute the same calls through `cast` for gas comparison.
+
+Use the repository virtualenv:
+
+```bash
+source .venv/bin/activate
+```
+
+Build Solar first if needed:
+
+```bash
+cd ../solar
+cargo build -p solar-compiler --bin solar
+cd ../solidity-compiler-benchmarks
+```
+
+Run a code-size comparison:
+
+```bash
+./solar_bench.py --solar ../solar/target/debug/solar
+```
+
+Run a subset:
+
+```bash
+./solar_bench.py --solar ../solar/target/debug/solar --tests counter arithmetic
+```
+
+Run gas comparison with a managed Anvil instance:
+
+```bash
+./solar_bench.py --solar ../solar/target/debug/solar --gas --start-anvil
+```
+
+If `solc` is managed by `solc-select`, select or install a concrete version before running:
+
+```bash
+solc-select install 0.8.30
+solc-select use 0.8.30
+```
+
+Or pass a binary directly:
+
+```bash
+./solar_bench.py --solc /path/to/solc --solar ../solar/target/debug/solar
+```
+
+Results are written to `solar_results/solar_latest.json`.
+
+The command exits non-zero if either compiler fails a selected test. For exploratory runs where failures should be recorded but not fail the process, pass `--allow-failures`.
+
+
+## ETHDebug Coverage Benchmark
 
 1. Ensure you have `solc-select` and the desired compiler versions installed:
    ```bash

@@ -3,5 +3,6 @@ results/
 mlir_artifacts/
 mlir_results/
 gas_results/
+solar_results/
 __pycache__/
 *.log
