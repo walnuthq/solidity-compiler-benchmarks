@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,12 +28,21 @@ RED = "\033[31m"
 CYAN = "\033[36m"
 BOLD = "\033[1m"
 USE_COLOR = sys.stdout.isatty()
+ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 def _color(text: str, color: str) -> str:
     if not USE_COLOR:
         return text
     return f"{color}{text}{RESET}"
+
+
+def visible_len(text: str) -> int:
+    return len(ANSI_RE.sub("", text))
+
+
+def pad_cell(text: str, width: int) -> str:
+    return text + " " * max(0, width - visible_len(text))
 
 
 def run(cmd: Sequence[str], input_text: Optional[str] = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -73,13 +81,15 @@ def find_binary(explicit: Optional[str], candidates: Sequence[str]) -> Optional[
     return None
 
 
-def binary_version(path: Path) -> str:
+def binary_version(path: Path) -> Tuple[str, str]:
     result = run([str(path), "--version"], timeout=30)
     if result.returncode != 0:
-        return "unknown"
+        error = (result.stderr or result.stdout or "version command failed").strip()
+        return "unavailable", error[:500]
     text = (result.stdout + "\n" + result.stderr).strip()
     match = re.search(r"(\d+\.\d+\.\d+(?:[-+][^\s]+)?)", text)
-    return match.group(1) if match else text.splitlines()[0] if text else "unknown"
+    version = match.group(1) if match else text.splitlines()[0] if text else "unknown"
+    return version, ""
 
 
 @dataclass(frozen=True)
@@ -366,7 +376,7 @@ def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[Compi
                 cell = _color("FAILED", RED)
             else:
                 cell = f"{size:,}B"
-            row += f" | {cell:<13}"
+            row += f" | {pad_cell(cell, 13)}"
         row += f" | {pct_delta(sizes[0], sizes[1]) if len(sizes) >= 2 else 'N/A'}"
         print(row)
 
@@ -395,7 +405,7 @@ def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[Compil
                 cell = _color("N/A", YELLOW)
             else:
                 cell = f"{gas:,}"
-            row += f" | {cell:<13}"
+            row += f" | {pad_cell(cell, 13)}"
         row += f" | {pct_delta(totals[0], totals[1]) if len(totals) >= 2 else 'N/A'}"
         print(row)
 
@@ -452,9 +462,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("Starting anvil...")
         anvil_proc = start_anvil()
 
+    solc_version, solc_version_error = binary_version(solc)
+    solar_version, solar_version_error = binary_version(solar)
+
     specs = [
-        CompilerSpec("solc", f"solc {binary_version(solc)}", solc, "solc"),
-        CompilerSpec("solar", f"solar {binary_version(solar)}", solar, "solar"),
+        CompilerSpec("solc", f"solc {solc_version}", solc, "solc"),
+        CompilerSpec("solar", f"solar {solar_version}", solar, "solar"),
     ]
 
     test_map = {test.test_id: test for test in TEST_CASES}
@@ -468,7 +481,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tests = list(TEST_CASES)
 
     print(f"Using {specs[0].label}")
+    if solc_version_error:
+        print(
+            _color(
+                "Warning: `solc --version` failed. If this is solc-select, run "
+                "`solc-select install 0.8.30 && solc-select use 0.8.30` or pass --solc /path/to/solc.",
+                YELLOW,
+            ),
+            file=sys.stderr,
+        )
     print(f"Using {specs[1].label}")
+    if solar_version_error:
+        print(_color(f"Warning: `solar --version` failed: {solar_version_error}", YELLOW), file=sys.stderr)
     print(f"Running {len(tests)} tests")
 
     try:
