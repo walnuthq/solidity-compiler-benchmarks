@@ -48,6 +48,39 @@ def pad_cell(text: str, width: int) -> str:
     return text + " " * max(0, width - visible_len(text))
 
 
+def display_path(path: str | Path) -> str:
+    path = Path(path)
+    if not path.is_absolute():
+        return str(path)
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        pass
+
+    try:
+        return str(path.relative_to(ROOT.parent).as_posix()).replace("../", "", 1)
+    except ValueError:
+        pass
+
+    home = Path.home()
+    try:
+        return "~/" + str(path.relative_to(home))
+    except ValueError:
+        pass
+
+    return path.name
+
+
+def display_command(cmd: Sequence[str | Path]) -> str:
+    sanitized = []
+    for part in cmd:
+        text = str(part)
+        candidate = Path(text)
+        sanitized.append(display_path(candidate) if candidate.is_absolute() else text)
+    return " ".join(sanitized)
+
+
+
 def run(
     cmd: Sequence[str],
     input_text: Optional[str] = None,
@@ -359,7 +392,7 @@ def compile_standard_json(spec: CompilerSpec, test_case: TestCase) -> Dict[str, 
         "error": "",
     }
     proc = run([str(spec.path), "--standard-json"], input_text=standard_json_input(test_case), timeout=120)
-    result["command"] = f"{spec.path} --standard-json"
+    result["command"] = f"{display_path(spec.path)} --standard-json"
     if proc.returncode != 0:
         result["status"] = "failed"
         result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
@@ -465,7 +498,7 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
             cmd.extend(case.remappings)
             cmd.append(case.source)
             proc = run(cmd, timeout=180, cwd=case.repo_path)
-            result["command"] = " ".join(cmd)
+            result["command"] = display_command(cmd)
             if proc.returncode != 0:
                 result["status"] = "failed"
                 result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
@@ -494,7 +527,7 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
             cmd.extend(case.remappings)
             cmd.append(case.source)
             proc = run(cmd, timeout=180, cwd=case.repo_path)
-            result["command"] = " ".join(cmd)
+            result["command"] = display_command(cmd)
             if proc.returncode != 0:
                 result["status"] = "failed"
                 result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
@@ -1037,7 +1070,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
     output = Path(args.output) if args.output else RESULT_ROOT / "solar_latest.json"
     output.write_text(json.dumps(results, indent=2))
-    print(f"\nResults saved to {output}")
+    print(f"\nResults saved to {display_path(output)}")
 
     failed = [
         (result["test_id"], compiler_id)
