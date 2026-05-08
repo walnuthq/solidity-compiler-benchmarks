@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parent
 RESULT_ROOT = ROOT / "solar_results"
 DEFAULT_RPC_URL = "http://127.0.0.1:8545"
 DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+DEFAULT_SENDER = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+DEFAULT_SPENDER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -126,6 +128,13 @@ class CompilerSpec:
 
 
 @dataclass(frozen=True)
+class RuntimeCheck:
+    label: str
+    signature: str
+    args: Sequence[str] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class SourceCase:
     test_id: str
     description: str
@@ -138,6 +147,7 @@ class SourceCase:
     test_calls: Sequence[Tuple[str, Sequence[str]]] = field(default_factory=tuple)
     constructor_args: Sequence[str] = field(default_factory=tuple)
     constructor_sig: Optional[str] = None
+    runtime_checks: Sequence[RuntimeCheck] = field(default_factory=tuple)
     min_solc: Optional[str] = None
     max_solc: Optional[str] = None
 
@@ -168,6 +178,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="openzeppelin-contracts",
         source="contracts/mocks/token/ERC20Mock.sol",
         contract_name="ERC20Mock",
+        test_calls=(
+            ("mint(address,uint256)", (DEFAULT_SENDER, "1000")),
+            ("burn(address,uint256)", (DEFAULT_SENDER, "400")),
+        ),
+        runtime_checks=(
+            RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
+            RuntimeCheck("supply", "totalSupply()(uint256)"),
+        ),
     ),
     SourceCase(
         test_id="openzeppelin-vesting-wallet",
@@ -176,6 +194,15 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="openzeppelin-contracts",
         source="contracts/finance/VestingWallet.sol",
         contract_name="VestingWallet",
+        constructor_args=(DEFAULT_SENDER, "1000", "100"),
+        constructor_sig="constructor(address,uint64,uint64)",
+        runtime_checks=(
+            RuntimeCheck("owner", "owner()(address)"),
+            RuntimeCheck("start", "start()(uint256)"),
+            RuntimeCheck("duration", "duration()(uint256)"),
+            RuntimeCheck("end", "end()(uint256)"),
+            RuntimeCheck("released", "released()(uint256)"),
+        ),
     ),
     SourceCase(
         test_id="nitro-one-step-proof",
@@ -192,6 +219,9 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="aave-v3-core",
         source="contracts/misc/L2Encoder.sol",
         contract_name="L2Encoder",
+        constructor_args=(DEFAULT_SPENDER,),
+        constructor_sig="constructor(address)",
+        runtime_checks=(RuntimeCheck("pool", "POOL()(address)"),),
     ),
     SourceCase(
         test_id="lilweb3-ens",
@@ -200,7 +230,8 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="lil-web3",
         source="src/LilENS.sol",
         contract_name="LilENS",
-        test_calls=(("register(string)", ("testname",)), ("lookup(string)", ("testname",))),
+        test_calls=(("register(string)", ("testname",)),),
+        runtime_checks=(RuntimeCheck("lookup", "lookup(string)(address)", ("testname",)),),
     ),
     SourceCase(
         test_id="lilweb3-flashloan",
@@ -227,8 +258,35 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="maple-erc20",
         source="contracts/ERC20.sol",
         contract_name="ERC20",
+        constructor_args=("Maple Token", "MPL", "18"),
+        constructor_sig="constructor(string,string,uint8)",
+        test_calls=(
+            ("approve(address,uint256)", (DEFAULT_SPENDER, "100")),
+            ("increaseAllowance(address,uint256)", (DEFAULT_SPENDER, "50")),
+            ("decreaseAllowance(address,uint256)", (DEFAULT_SPENDER, "20")),
+        ),
+        runtime_checks=(
+            RuntimeCheck("name", "name()(string)"),
+            RuntimeCheck("symbol", "symbol()(string)"),
+            RuntimeCheck("decimals", "decimals()(uint8)"),
+            RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
+        ),
     ),
 )
+
+
+MICRO_RUNTIME_CHECKS: Dict[str, Sequence[RuntimeCheck]] = {
+    "factorial": (RuntimeCheck("result", "getResult()(uint256)"),),
+    "counter": (RuntimeCheck("count", "count()(uint256)"),),
+    "sum-array": (RuntimeCheck("total", "total()(uint256)"),),
+    "arithmetic": (RuntimeCheck("value", "value()(uint256)"),),
+}
+
+
+def runtime_checks(test_case: TestCase | SourceCase) -> Sequence[RuntimeCheck]:
+    if isinstance(test_case, SourceCase):
+        return test_case.runtime_checks
+    return MICRO_RUNTIME_CHECKS.get(test_case.test_id, ())
 
 
 def standard_json_input(test_case: TestCase) -> str:
@@ -491,17 +549,17 @@ def abi_encode_constructor(constructor_args: Sequence[str], constructor_sig: Opt
 
 def deploy_contract(
     bytecode: str,
-    test_case: TestCase,
+    test_case: TestCase | SourceCase,
     rpc_url: str,
     private_key: str,
-) -> Tuple[Optional[str], str]:
+) -> Tuple[Optional[str], Optional[int], str]:
     if not bytecode.startswith("0x"):
         bytecode = "0x" + bytecode
 
     constructor_sig = getattr(test_case, "constructor_sig", None)
     encoded = abi_encode_constructor(test_case.constructor_args, constructor_sig)
     if encoded is None:
-        return None, "constructor args require constructor_sig"
+        return None, None, "constructor args require constructor_sig"
     bytecode += encoded
 
     proc = run(
@@ -519,12 +577,19 @@ def deploy_contract(
         timeout=60,
     )
     if proc.returncode != 0:
-        return None, proc.stderr[:1000]
+        return None, None, proc.stderr[:1000]
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        return None, f"invalid deploy JSON: {exc}"
-    return data.get("contractAddress"), ""
+        return None, None, f"invalid deploy JSON: {exc}"
+    gas = data.get("gasUsed")
+    if isinstance(gas, str):
+        deploy_gas = int(gas, 16) if gas.startswith("0x") else int(gas)
+    elif gas is None:
+        deploy_gas = None
+    else:
+        deploy_gas = int(gas)
+    return data.get("contractAddress"), deploy_gas, ""
 
 
 def call_contract(
@@ -561,6 +626,67 @@ def call_contract(
     return int(gas), ""
 
 
+def read_contract(
+    address: str,
+    signature: str,
+    args: Sequence[str],
+    rpc_url: str,
+) -> Tuple[Optional[str], str]:
+    proc = run(["cast", "call", address, signature, *args, "--rpc-url", rpc_url], timeout=60)
+    if proc.returncode != 0:
+        return None, proc.stderr[:1000]
+    value = " ".join(proc.stdout.split())
+    if value.startswith("0x"):
+        value = value.lower()
+    return value, ""
+
+
+def compare_runtime_results(entry: Dict[str, object], specs: Sequence[CompilerSpec]) -> None:
+    labels = []
+    values_by_compiler: Dict[str, Dict[str, str]] = {}
+    failed = False
+
+    for spec in specs:
+        data = entry["compilers"].get(spec.compiler_id, {})
+        check_results = data.get("runtime_results") or []
+        if data.get("runtime_status") == "failed":
+            failed = True
+        values_by_compiler[spec.compiler_id] = {
+            str(result.get("label")): str(result.get("value"))
+            for result in check_results
+            if result.get("status") == "ok"
+        }
+        for result in check_results:
+            label = str(result.get("label"))
+            if label not in labels:
+                labels.append(label)
+
+    if not labels:
+        entry["runtime_status"] = "skipped"
+        return
+
+    mismatches = []
+    for label in labels:
+        values = {
+            spec.compiler_id: values_by_compiler.get(spec.compiler_id, {}).get(label)
+            for spec in specs
+        }
+        if any(value is None for value in values.values()):
+            failed = True
+            continue
+        unique_values = set(values.values())
+        if len(unique_values) > 1:
+            mismatches.append({"label": label, "values": values})
+
+    entry["runtime_mismatches"] = mismatches
+    if mismatches:
+        entry["runtime_status"] = "mismatch"
+    elif failed:
+        entry["runtime_status"] = "failed"
+    else:
+        entry["runtime_status"] = "ok"
+
+
 def run_test_case(
     test_case: TestCase | SourceCase,
     specs: Sequence[CompilerSpec],
@@ -589,10 +715,15 @@ def run_test_case(
         compiler_entry.pop("bytecode", None)
         entry["compilers"][spec.compiler_id] = compiler_entry
 
+        checks = runtime_checks(test_case)
         if compiled["status"] != "ok" or not include_gas:
             continue
+        if not test_case.test_calls and not checks:
+            compiler_entry["deploy_status"] = "skipped"
+            compiler_entry["runtime_status"] = "skipped"
+            continue
 
-        address, deploy_error = deploy_contract(
+        address, deploy_gas, deploy_error = deploy_contract(
             str(compiled["bytecode"]),
             test_case,
             rpc_url,
@@ -600,10 +731,12 @@ def run_test_case(
         )
         if not address:
             compiler_entry["deploy_status"] = "failed"
+            compiler_entry["runtime_status"] = "failed" if checks else "skipped"
             compiler_entry["deploy_error"] = deploy_error
             continue
 
         compiler_entry["deploy_status"] = "ok"
+        compiler_entry["deploy_gas"] = deploy_gas
         compiler_entry["address"] = address
         gas_results = []
         total_gas = 0
@@ -616,6 +749,34 @@ def run_test_case(
             total_gas += gas
         compiler_entry["gas_results"] = gas_results
         compiler_entry["total_gas"] = total_gas
+
+        runtime_results = []
+        runtime_failed = False
+        for check in checks:
+            value, error = read_contract(address, check.signature, check.args, rpc_url)
+            if value is None:
+                runtime_failed = True
+                runtime_results.append({
+                    "label": check.label,
+                    "call": check.signature,
+                    "args": list(check.args),
+                    "status": "failed",
+                    "error": error,
+                })
+                continue
+            runtime_results.append({
+                "label": check.label,
+                "call": check.signature,
+                "args": list(check.args),
+                "status": "ok",
+                "value": value,
+            })
+        if checks:
+            compiler_entry["runtime_results"] = runtime_results
+            compiler_entry["runtime_status"] = "failed" if runtime_failed else "ok"
+
+    if include_gas:
+        compare_runtime_results(entry, specs)
 
     return entry
 
@@ -652,6 +813,31 @@ def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[Compi
                 cell = f"{size:,}B"
             row += f" | {pad_cell(cell, 13)}"
         row += f" | {pct_delta(sizes[0], sizes[1]) if len(sizes) >= 2 else 'N/A'}"
+        print(row)
+
+
+def print_runtime_table(results: Sequence[Dict[str, object]]) -> None:
+    print("\n" + _color("Runtime Result Match", BOLD))
+    test_width = max(22, *(visible_len(str(result["test_id"])) for result in results)) if results else 22
+    header = f"{'Test':<{test_width}} | Status       | Checks"
+    print(header)
+    print("-" * len(header))
+
+    for result in results:
+        status = str(result.get("runtime_status") or "skipped")
+        if status == "ok":
+            cell = _color("OK", GREEN)
+        elif status == "mismatch":
+            cell = _color("MISMATCH", RED)
+        elif status == "failed":
+            cell = _color("ERROR", RED)
+        else:
+            cell = _color("N/A", YELLOW)
+        checks = max(
+            (len((data or {}).get("runtime_results") or []) for data in result["compilers"].values()),
+            default=0,
+        )
+        row = f"{str(result['test_id']):<{test_width}} | {pad_cell(cell, 12)} | {checks if checks else 'N/A'}"
         print(row)
 
 
@@ -703,7 +889,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Run repo contracts even when their pragma is incompatible with the selected solc",
     )
-    parser.add_argument("--gas", action="store_true", help="Deploy and execute gas test calls with cast/anvil")
+    parser.add_argument("--gas", action="store_true", help="Deploy, execute gas calls, and compare runtime results with cast/anvil")
     parser.add_argument("--start-anvil", action="store_true", help="Start anvil automatically for --gas")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help=f"RPC URL (default: {DEFAULT_RPC_URL})")
     parser.add_argument("--private-key", default=DEFAULT_PRIVATE_KEY, help="Private key for transactions")
@@ -794,8 +980,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 compatible_tests.append(test)
         tests = compatible_tests
 
-    if args.gas and any(isinstance(test, SourceCase) and not test.test_calls for test in tests):
-        print(_color("repo contracts without gas calls will show N/A in the gas table", YELLOW), file=sys.stderr)
+    if args.gas and any(isinstance(test, SourceCase) and not test.test_calls and not runtime_checks(test) for test in tests):
+        print(_color("repo contracts without gas calls or runtime checks will show N/A in the gas table", YELLOW), file=sys.stderr)
 
     print(f"Using {specs[0].label}")
     if solc_version_error:
@@ -827,6 +1013,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print_size_table(results, specs)
     if args.gas:
+        print_runtime_table(results)
         print_gas_table(results, specs)
 
     if args.verbose:
@@ -834,6 +1021,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for compiler_id, data in result["compilers"].items():
                 if data.get("status") != "ok":
                     print(f"\n{result['test_id']} {compiler_id} error:\n{data.get('error', '')}")
+                for check in data.get("runtime_results") or []:
+                    if check.get("status") != "ok":
+                        print(
+                            f"\n{result['test_id']} {compiler_id} runtime {check.get('label')} error:\n"
+                            f"{check.get('error', '')}"
+                        )
+            for mismatch in result.get("runtime_mismatches") or []:
+                values = ", ".join(
+                    f"{compiler_id}={value}"
+                    for compiler_id, value in mismatch.get("values", {}).items()
+                )
+                print(f"\n{result['test_id']} runtime mismatch {mismatch.get('label')}: {values}")
 
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
     output = Path(args.output) if args.output else RESULT_ROOT / "solar_latest.json"
@@ -846,11 +1045,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for compiler_id, data in result["compilers"].items()
         if data.get("status") != "ok"
     ]
-    if failed and not args.allow_failures:
-        print(
-            _color(f"{len(failed)} compiler runs failed; use --allow-failures to keep exit code 0", RED),
-            file=sys.stderr,
-        )
+    runtime_failed = [
+        result["test_id"]
+        for result in results
+        if result.get("runtime_status") in ("failed", "mismatch")
+    ]
+    if (failed or runtime_failed) and not args.allow_failures:
+        if failed:
+            print(
+                _color(f"{len(failed)} compiler runs failed; use --allow-failures to keep exit code 0", RED),
+                file=sys.stderr,
+            )
+        if runtime_failed:
+            print(
+                _color(f"{len(runtime_failed)} runtime checks failed; use --allow-failures to keep exit code 0", RED),
+                file=sys.stderr,
+            )
         return 1
 
     return 0

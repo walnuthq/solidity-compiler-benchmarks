@@ -35,7 +35,7 @@ Variable Location Coverage Averages:
 
 ## Solar vs solc
 
-`solar_bench.py` is the main benchmark for comparing Solar codegen against solc. It compiles both compilers through standard-json, reports deployed bytecode size by default, and can optionally deploy the contracts to Anvil and execute the same calls through `cast` for gas comparison.
+`solar_bench.py` is the main benchmark for comparing Solar codegen against solc. It compiles both compilers through standard-json, reports deployed bytecode size by default, and can optionally deploy the contracts to Anvil, execute the same calls through `cast`, compare gas, and verify selected runtime results match between the solc and Solar bytecode.
 
 Use the repository virtualenv:
 
@@ -85,11 +85,13 @@ Run one repository project or contract:
 ./solar_bench.py --solar ../solar/target/debug/solar --suite repo --tests aave-l2-encoder maple-erc20
 ```
 
-Run gas comparison with a managed Anvil instance:
+Run gas comparison and runtime result checks with a managed Anvil instance:
 
 ```bash
 ./solar_bench.py --solar ../solar/target/debug/solar --gas --start-anvil
 ```
+
+Runtime checks are curated per benchmark. They deploy both compiler outputs, run the configured transactions, then compare read-only results such as public storage getters. Mismatches are printed in verbose mode and recorded in `runtime_mismatches` in the JSON output.
 
 If `solc` is managed by `solc-select`, select or install a concrete version before running:
 
@@ -106,7 +108,7 @@ Or pass a binary directly:
 
 Results are written to `solar_results/solar_latest.json`.
 
-The command exits non-zero if either compiler fails a selected test. For exploratory runs where failures should be recorded but not fail the process, pass `--allow-failures`.
+The command exits non-zero if either compiler fails a selected test or if runtime result checks mismatch. For exploratory runs where failures should be recorded but not fail the process, pass `--allow-failures`.
 
 
 ## ETHDebug Coverage Benchmark
