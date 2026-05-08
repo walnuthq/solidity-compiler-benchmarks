@@ -7,7 +7,7 @@ This repository collects Solidity contracts and scripts to evaluate compilers in
 - **MLIR compilation testing** (`mlir_bench.py`) - Tests MLIR pipeline compatibility
 - **Gas comparison** (`gas_bench.py`) - Compares gas usage between compiler configurations
 
-The primary workflow is now `solar_bench.py`, which compares solc and Solar codegen on the same contracts. The older scripts remain available for ETHDebug coverage and legacy MLIR experiments.
+The primary workflow is now `solar_bench.py`, which compares solc and Solar codegen on the same contracts. The other scripts remain available for ETHDebug coverage, MLIR experiments, and compiler gas comparisons.
 
 An ETHDebug coverage example:
 
@@ -43,13 +43,21 @@ Use the repository virtualenv:
 source .venv/bin/activate
 ```
 
-Build Solar first if needed:
+Build Solar first if needed. These commands assume this repository and the Solar compiler repository are sibling directories:
+
+```text
+SOLAR/
+  solar/
+  solidity-compiler-benchmarks/
+```
+
+From this repository, build the Solar binary without changing directories:
 
 ```bash
-cd ../solar
-cargo build -p solar-compiler --bin solar
-cd ../solidity-compiler-benchmarks
+cargo build --manifest-path ../solar/Cargo.toml -p solar-compiler --bin solar
 ```
+
+The examples below pass that binary as `../solar/target/debug/solar`.
 
 Run a code-size comparison:
 
