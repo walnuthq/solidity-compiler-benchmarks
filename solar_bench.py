@@ -23,6 +23,9 @@ DEFAULT_RPC_URL = "http://127.0.0.1:8545"
 DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 DEFAULT_SENDER = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 DEFAULT_SPENDER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+DEFAULT_THIRD = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+DEFAULT_FOURTH = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+MAX_UINT256 = str((1 << 256) - 1)
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -214,10 +217,16 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         test_calls=(
             ("mint(address,uint256)", (DEFAULT_SENDER, "1000")),
             ("burn(address,uint256)", (DEFAULT_SENDER, "400")),
+            ("approve(address,uint256)", (DEFAULT_SPENDER, "250")),
         ),
         runtime_checks=(
+            RuntimeCheck("name", "name()(string)"),
+            RuntimeCheck("symbol", "symbol()(string)"),
+            RuntimeCheck("decimals", "decimals()(uint8)"),
             RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
+            RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("supply", "totalSupply()(uint256)"),
+            RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
         ),
     ),
     SourceCase(
@@ -229,12 +238,22 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         contract_name="VestingWallet",
         constructor_args=(DEFAULT_SENDER, "1000", "100"),
         constructor_sig="constructor(address,uint64,uint64)",
+        test_calls=(
+            ("vestedAmount(uint64)", ("999",)),
+            ("vestedAmount(uint64)", ("1050",)),
+            ("releasable()", ()),
+        ),
         runtime_checks=(
             RuntimeCheck("owner", "owner()(address)"),
             RuntimeCheck("start", "start()(uint256)"),
             RuntimeCheck("duration", "duration()(uint256)"),
             RuntimeCheck("end", "end()(uint256)"),
             RuntimeCheck("released", "released()(uint256)"),
+            RuntimeCheck("released-token", "released(address)(uint256)", (DEFAULT_SPENDER,)),
+            RuntimeCheck("releasable", "releasable()(uint256)"),
+            RuntimeCheck("vested-before-start", "vestedAmount(uint64)(uint256)", ("999",)),
+            RuntimeCheck("vested-half", "vestedAmount(uint64)(uint256)", ("1050",)),
+            RuntimeCheck("vested-end", "vestedAmount(uint64)(uint256)", ("1100",)),
         ),
     ),
     SourceCase(
@@ -244,17 +263,87 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="nitro-contracts",
         source="src/osp/OneStepProofEntry.sol",
         contract_name="OneStepProofEntry",
+        constructor_args=(DEFAULT_SENDER, DEFAULT_SPENDER, DEFAULT_THIRD, DEFAULT_FOURTH),
+        constructor_sig="constructor(address,address,address,address)",
+        test_calls=(
+            ("prover0()", ()),
+            ("proverMem()", ()),
+            ("proverMath()", ()),
+            ("proverHostIo()", ()),
+            (
+                "getStartMachineHash(bytes32,bytes32)",
+                (
+                    "0x0000000000000000000000000000000000000000000000000000000000000011",
+                    "0x0000000000000000000000000000000000000000000000000000000000000022",
+                ),
+            ),
+        ),
+        runtime_checks=(
+            RuntimeCheck("prover0", "prover0()(address)"),
+            RuntimeCheck("proverMem", "proverMem()(address)"),
+            RuntimeCheck("proverMath", "proverMath()(address)"),
+            RuntimeCheck("proverHostIo", "proverHostIo()(address)"),
+            RuntimeCheck(
+                "start-machine-hash",
+                "getStartMachineHash(bytes32,bytes32)(bytes32)",
+                (
+                    "0x0000000000000000000000000000000000000000000000000000000000000011",
+                    "0x0000000000000000000000000000000000000000000000000000000000000022",
+                ),
+            ),
+        ),
     ),
     SourceCase(
         test_id="aave-l2-encoder",
         description="Aave V3 L2Encoder",
         project="aave-v3-core",
-        repo="aave-v3-core",
-        source="contracts/misc/L2Encoder.sol",
-        contract_name="L2Encoder",
-        constructor_args=(DEFAULT_SPENDER,),
-        constructor_sig="constructor(address)",
-        runtime_checks=(RuntimeCheck("pool", "POOL()(address)"),),
+        repo=".",
+        source="fixtures/aave/L2EncoderHarness.sol",
+        contract_name="L2EncoderHarness",
+        test_calls=(
+            ("POOL()", ()),
+            ("encodeSupplyParams(address,uint256,uint16)", (DEFAULT_SPENDER, "123456", "7")),
+            ("encodeWithdrawParams(address,uint256)", (DEFAULT_THIRD, MAX_UINT256)),
+            ("encodeBorrowParams(address,uint256,uint256,uint16)", (DEFAULT_SPENDER, "2222", "2", "9")),
+            ("encodeSetUserUseReserveAsCollateral(address,bool)", (DEFAULT_THIRD, "true")),
+        ),
+        runtime_checks=(
+            RuntimeCheck("supply", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_SPENDER, "123456", "7")),
+            RuntimeCheck("withdraw-max", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_THIRD, MAX_UINT256)),
+            RuntimeCheck(
+                "borrow",
+                "encodeBorrowParams(address,uint256,uint256,uint16)(bytes32)",
+                (DEFAULT_SPENDER, "2222", "2", "9"),
+            ),
+            RuntimeCheck(
+                "repay",
+                "encodeRepayParams(address,uint256,uint256)(bytes32)",
+                (DEFAULT_THIRD, "3333", "1"),
+            ),
+            RuntimeCheck(
+                "supply-permit",
+                "encodeSupplyWithPermitParams(address,uint256,uint16,uint256,uint8,bytes32,bytes32)(bytes32,bytes32,bytes32)",
+                (
+                    DEFAULT_SPENDER,
+                    "4444",
+                    "11",
+                    "123456789",
+                    "27",
+                    "0x00000000000000000000000000000000000000000000000000000000000000aa",
+                    "0x00000000000000000000000000000000000000000000000000000000000000bb",
+                ),
+            ),
+            RuntimeCheck(
+                "collateral-true",
+                "encodeSetUserUseReserveAsCollateral(address,bool)(bytes32)",
+                (DEFAULT_THIRD, "true"),
+            ),
+            RuntimeCheck(
+                "liquidation",
+                "encodeLiquidationCall(address,address,address,uint256,bool)(bytes32,bytes32)",
+                (DEFAULT_SPENDER, DEFAULT_THIRD, DEFAULT_FOURTH, "5555", "false"),
+            ),
+        ),
     ),
     SourceCase(
         test_id="lilweb3-ens",
@@ -263,8 +352,19 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         repo="lil-web3",
         source="src/LilENS.sol",
         contract_name="LilENS",
-        test_calls=(("register(string)", ("testname",)),),
-        runtime_checks=(RuntimeCheck("lookup", "lookup(string)(address)", ("testname",)),),
+        test_calls=(
+            ("register(string)", ("testname",)),
+            ("update(string,address)", ("testname", DEFAULT_SPENDER)),
+            ("register(string)", ("second",)),
+            ("update(string,address)", ("second", DEFAULT_THIRD)),
+            ("register(string)", ("untouched",)),
+        ),
+        runtime_checks=(
+            RuntimeCheck("lookup-updated", "lookup(string)(address)", ("testname",)),
+            RuntimeCheck("lookup-second", "lookup(string)(address)", ("second",)),
+            RuntimeCheck("lookup-untouched", "lookup(string)(address)", ("untouched",)),
+            RuntimeCheck("missing", "lookup(string)(address)", ("missing",)),
+        ),
     ),
     SourceCase(
         test_id="lilweb3-flashloan",
@@ -274,6 +374,25 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         source="src/LilFlashloan.sol",
         contract_name="LilFlashloan",
         remappings=("solmate/=lib/solmate/src/",),
+        test_calls=(
+            ("manager()", ()),
+            ("setFees(address,uint256)", (DEFAULT_SPENDER, "250")),
+            ("setFees(address,uint256)", (DEFAULT_THIRD, "1000")),
+        ),
+        runtime_checks=(
+            RuntimeCheck("manager", "manager()(address)"),
+            RuntimeCheck("fee-spender", "fees(address)(uint256)", (DEFAULT_SPENDER,)),
+            RuntimeCheck("fee-third", "fees(address)(uint256)", (DEFAULT_THIRD,)),
+            RuntimeCheck("fee-missing", "fees(address)(uint256)", (DEFAULT_FOURTH,)),
+            RuntimeCheck("computed-fee-spender", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "10000")),
+            RuntimeCheck(
+                "computed-fee-spender-rounded",
+                "getFee(address,uint256)(uint256)",
+                (DEFAULT_SPENDER, "33333"),
+            ),
+            RuntimeCheck("computed-fee-third", "getFee(address,uint256)(uint256)", (DEFAULT_THIRD, "12345")),
+            RuntimeCheck("computed-fee-missing", "getFee(address,uint256)(uint256)", (DEFAULT_FOURTH, "10000")),
+        ),
     ),
     SourceCase(
         test_id="lilweb3-fractional",
@@ -283,6 +402,34 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         source="src/LilFractional.sol",
         contract_name="LilFractional",
         remappings=("solmate/=lib/solmate/src/",),
+        test_calls=(
+            ("getVault(uint256)", ("0",)),
+            ("getVault(uint256)", ("1",)),
+            ("getVault(uint256)", ("42",)),
+            (
+                "onERC721Received(address,address,uint256,bytes)",
+                (DEFAULT_SENDER, DEFAULT_SPENDER, "7", "0x"),
+            ),
+            (
+                "onERC721Received(address,address,uint256,bytes)",
+                (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"),
+            ),
+        ),
+        runtime_checks=(
+            RuntimeCheck("empty-vault-zero", "getVault(uint256)(address,uint256,uint256,address)", ("0",)),
+            RuntimeCheck("empty-vault-one", "getVault(uint256)(address,uint256,uint256,address)", ("1",)),
+            RuntimeCheck("empty-vault-forty-two", "getVault(uint256)(address,uint256,uint256,address)", ("42",)),
+            RuntimeCheck(
+                "erc721-receiver-empty-data",
+                "onERC721Received(address,address,uint256,bytes)(bytes4)",
+                (DEFAULT_SENDER, DEFAULT_SPENDER, "7", "0x"),
+            ),
+            RuntimeCheck(
+                "erc721-receiver-nonempty-data",
+                "onERC721Received(address,address,uint256,bytes)(bytes4)",
+                (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"),
+            ),
+        ),
     ),
     SourceCase(
         test_id="maple-erc20",
@@ -302,7 +449,13 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("name", "name()(string)"),
             RuntimeCheck("symbol", "symbol()(string)"),
             RuntimeCheck("decimals", "decimals()(uint8)"),
+            RuntimeCheck("total-supply", "totalSupply()(uint256)"),
+            RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
+            RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
+            RuntimeCheck("reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_SPENDER, DEFAULT_SENDER)),
+            RuntimeCheck("nonce", "nonces(address)(uint256)", (DEFAULT_SENDER,)),
+            RuntimeCheck("permit-typehash", "PERMIT_TYPEHASH()(bytes32)"),
         ),
     ),
 )
