@@ -25,7 +25,9 @@ DEFAULT_SENDER = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 DEFAULT_SPENDER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 DEFAULT_THIRD = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 DEFAULT_FOURTH = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 MAX_UINT256 = str((1 << 256) - 1)
+EDGE_BYTES32 = "0x" + "ff" * 31 + "f0"
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -218,6 +220,7 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("mint(address,uint256)", (DEFAULT_SENDER, "1000")),
             ("burn(address,uint256)", (DEFAULT_SENDER, "400")),
             ("approve(address,uint256)", (DEFAULT_SPENDER, "250")),
+            ("transfer(address,uint256)", (DEFAULT_THIRD, "125")),
         ),
         runtime_checks=(
             RuntimeCheck("name", "name()(string)"),
@@ -225,8 +228,10 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("decimals", "decimals()(uint8)"),
             RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
             RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
+            RuntimeCheck("third-balance", "balanceOf(address)(uint256)", (DEFAULT_THIRD,)),
             RuntimeCheck("supply", "totalSupply()(uint256)"),
             RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
+            RuntimeCheck("third-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_THIRD)),
         ),
     ),
     SourceCase(
@@ -252,8 +257,12 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("released-token", "released(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("releasable", "releasable()(uint256)"),
             RuntimeCheck("vested-before-start", "vestedAmount(uint64)(uint256)", ("999",)),
+            RuntimeCheck("vested-at-start", "vestedAmount(uint64)(uint256)", ("1000",)),
+            RuntimeCheck("vested-after-start", "vestedAmount(uint64)(uint256)", ("1001",)),
             RuntimeCheck("vested-half", "vestedAmount(uint64)(uint256)", ("1050",)),
+            RuntimeCheck("vested-before-end", "vestedAmount(uint64)(uint256)", ("1099",)),
             RuntimeCheck("vested-end", "vestedAmount(uint64)(uint256)", ("1100",)),
+            RuntimeCheck("vested-after-end", "vestedAmount(uint64)(uint256)", ("1101",)),
         ),
     ),
     SourceCase(
@@ -277,6 +286,13 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                     "0x0000000000000000000000000000000000000000000000000000000000000022",
                 ),
             ),
+            (
+                "getStartMachineHash(bytes32,bytes32)",
+                (
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    EDGE_BYTES32,
+                ),
+            ),
         ),
         runtime_checks=(
             RuntimeCheck("prover0", "prover0()(address)"),
@@ -289,6 +305,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 (
                     "0x0000000000000000000000000000000000000000000000000000000000000011",
                     "0x0000000000000000000000000000000000000000000000000000000000000022",
+                ),
+            ),
+            RuntimeCheck(
+                "start-machine-hash-edge",
+                "getStartMachineHash(bytes32,bytes32)(bytes32)",
+                (
+                    "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    EDGE_BYTES32,
                 ),
             ),
         ),
@@ -306,9 +330,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("encodeWithdrawParams(address,uint256)", (DEFAULT_THIRD, MAX_UINT256)),
             ("encodeBorrowParams(address,uint256,uint256,uint16)", (DEFAULT_SPENDER, "2222", "2", "9")),
             ("encodeSetUserUseReserveAsCollateral(address,bool)", (DEFAULT_THIRD, "true")),
+            ("encodeRepayWithATokensParams(address,uint256,uint256)", (DEFAULT_FOURTH, MAX_UINT256, "2")),
+            ("encodeSwapBorrowRateMode(address,uint256)", (DEFAULT_SENDER, "1")),
+            ("encodeRebalanceStableBorrowRate(address,address)", (DEFAULT_SPENDER, DEFAULT_THIRD)),
         ),
         runtime_checks=(
             RuntimeCheck("supply", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_SPENDER, "123456", "7")),
+            RuntimeCheck("supply-zero", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_SENDER, "0", "0")),
+            RuntimeCheck("withdraw-small", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_SENDER, "1")),
             RuntimeCheck("withdraw-max", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_THIRD, MAX_UINT256)),
             RuntimeCheck(
                 "borrow",
@@ -316,9 +345,19 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 (DEFAULT_SPENDER, "2222", "2", "9"),
             ),
             RuntimeCheck(
+                "borrow-stable",
+                "encodeBorrowParams(address,uint256,uint256,uint16)(bytes32)",
+                (DEFAULT_SENDER, "1", "1", "0"),
+            ),
+            RuntimeCheck(
                 "repay",
                 "encodeRepayParams(address,uint256,uint256)(bytes32)",
                 (DEFAULT_THIRD, "3333", "1"),
+            ),
+            RuntimeCheck(
+                "repay-max",
+                "encodeRepayParams(address,uint256,uint256)(bytes32)",
+                (DEFAULT_FOURTH, MAX_UINT256, "2"),
             ),
             RuntimeCheck(
                 "supply-permit",
@@ -334,14 +373,52 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 ),
             ),
             RuntimeCheck(
+                "repay-permit",
+                "encodeRepayWithPermitParams(address,uint256,uint256,uint256,uint8,bytes32,bytes32)(bytes32,bytes32,bytes32)",
+                (
+                    DEFAULT_THIRD,
+                    MAX_UINT256,
+                    "2",
+                    "987654321",
+                    "28",
+                    "0x00000000000000000000000000000000000000000000000000000000000000cc",
+                    "0x00000000000000000000000000000000000000000000000000000000000000dd",
+                ),
+            ),
+            RuntimeCheck(
+                "repay-atokens",
+                "encodeRepayWithATokensParams(address,uint256,uint256)(bytes32)",
+                (DEFAULT_FOURTH, MAX_UINT256, "2"),
+            ),
+            RuntimeCheck(
+                "swap-rate",
+                "encodeSwapBorrowRateMode(address,uint256)(bytes32)",
+                (DEFAULT_SENDER, "1"),
+            ),
+            RuntimeCheck(
+                "rebalance",
+                "encodeRebalanceStableBorrowRate(address,address)(bytes32)",
+                (DEFAULT_SPENDER, DEFAULT_THIRD),
+            ),
+            RuntimeCheck(
                 "collateral-true",
                 "encodeSetUserUseReserveAsCollateral(address,bool)(bytes32)",
                 (DEFAULT_THIRD, "true"),
             ),
             RuntimeCheck(
+                "collateral-false",
+                "encodeSetUserUseReserveAsCollateral(address,bool)(bytes32)",
+                (DEFAULT_THIRD, "false"),
+            ),
+            RuntimeCheck(
                 "liquidation",
                 "encodeLiquidationCall(address,address,address,uint256,bool)(bytes32,bytes32)",
                 (DEFAULT_SPENDER, DEFAULT_THIRD, DEFAULT_FOURTH, "5555", "false"),
+            ),
+            RuntimeCheck(
+                "liquidation-max",
+                "encodeLiquidationCall(address,address,address,uint256,bool)(bytes32,bytes32)",
+                (DEFAULT_THIRD, DEFAULT_SPENDER, DEFAULT_SENDER, MAX_UINT256, "true"),
             ),
         ),
     ),
@@ -358,11 +435,16 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("register(string)", ("second",)),
             ("update(string,address)", ("second", DEFAULT_THIRD)),
             ("register(string)", ("untouched",)),
+            ("register(string)", ("",)),
+            ("register(string)", ("long-subdomain-name",)),
+            ("update(string,address)", ("long-subdomain-name", DEFAULT_FOURTH)),
         ),
         runtime_checks=(
             RuntimeCheck("lookup-updated", "lookup(string)(address)", ("testname",)),
             RuntimeCheck("lookup-second", "lookup(string)(address)", ("second",)),
             RuntimeCheck("lookup-untouched", "lookup(string)(address)", ("untouched",)),
+            RuntimeCheck("lookup-empty", "lookup(string)(address)", ("",)),
+            RuntimeCheck("lookup-long", "lookup(string)(address)", ("long-subdomain-name",)),
             RuntimeCheck("missing", "lookup(string)(address)", ("missing",)),
         ),
     ),
@@ -378,20 +460,25 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("manager()", ()),
             ("setFees(address,uint256)", (DEFAULT_SPENDER, "250")),
             ("setFees(address,uint256)", (DEFAULT_THIRD, "1000")),
+            ("setFees(address,uint256)", (DEFAULT_FOURTH, "10000")),
         ),
         runtime_checks=(
             RuntimeCheck("manager", "manager()(address)"),
             RuntimeCheck("fee-spender", "fees(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("fee-third", "fees(address)(uint256)", (DEFAULT_THIRD,)),
-            RuntimeCheck("fee-missing", "fees(address)(uint256)", (DEFAULT_FOURTH,)),
+            RuntimeCheck("fee-fourth", "fees(address)(uint256)", (DEFAULT_FOURTH,)),
+            RuntimeCheck("fee-missing", "fees(address)(uint256)", (ZERO_ADDRESS,)),
+            RuntimeCheck("computed-fee-zero", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "0")),
             RuntimeCheck("computed-fee-spender", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "10000")),
+            RuntimeCheck("computed-fee-spender-small", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "1")),
             RuntimeCheck(
                 "computed-fee-spender-rounded",
                 "getFee(address,uint256)(uint256)",
                 (DEFAULT_SPENDER, "33333"),
             ),
             RuntimeCheck("computed-fee-third", "getFee(address,uint256)(uint256)", (DEFAULT_THIRD, "12345")),
-            RuntimeCheck("computed-fee-missing", "getFee(address,uint256)(uint256)", (DEFAULT_FOURTH, "10000")),
+            RuntimeCheck("computed-fee-fourth", "getFee(address,uint256)(uint256)", (DEFAULT_FOURTH, "12345")),
+            RuntimeCheck("computed-fee-missing", "getFee(address,uint256)(uint256)", (ZERO_ADDRESS, "10000")),
         ),
     ),
     SourceCase(
@@ -414,11 +501,16 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 "onERC721Received(address,address,uint256,bytes)",
                 (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"),
             ),
+            (
+                "onERC721Received(address,address,uint256,bytes)",
+                (ZERO_ADDRESS, ZERO_ADDRESS, "0", "0x" + "11" * 32),
+            ),
         ),
         runtime_checks=(
             RuntimeCheck("empty-vault-zero", "getVault(uint256)(address,uint256,uint256,address)", ("0",)),
             RuntimeCheck("empty-vault-one", "getVault(uint256)(address,uint256,uint256,address)", ("1",)),
             RuntimeCheck("empty-vault-forty-two", "getVault(uint256)(address,uint256,uint256,address)", ("42",)),
+            RuntimeCheck("empty-vault-max", "getVault(uint256)(address,uint256,uint256,address)", (MAX_UINT256,)),
             RuntimeCheck(
                 "erc721-receiver-empty-data",
                 "onERC721Received(address,address,uint256,bytes)(bytes4)",
@@ -428,6 +520,11 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 "erc721-receiver-nonempty-data",
                 "onERC721Received(address,address,uint256,bytes)(bytes4)",
                 (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"),
+            ),
+            RuntimeCheck(
+                "erc721-receiver-word-data",
+                "onERC721Received(address,address,uint256,bytes)(bytes4)",
+                (ZERO_ADDRESS, ZERO_ADDRESS, "0", "0x" + "11" * 32),
             ),
         ),
     ),
@@ -444,6 +541,9 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("approve(address,uint256)", (DEFAULT_SPENDER, "100")),
             ("increaseAllowance(address,uint256)", (DEFAULT_SPENDER, "50")),
             ("decreaseAllowance(address,uint256)", (DEFAULT_SPENDER, "20")),
+            ("approve(address,uint256)", (DEFAULT_THIRD, "77")),
+            ("increaseAllowance(address,uint256)", (DEFAULT_THIRD, "23")),
+            ("decreaseAllowance(address,uint256)", (DEFAULT_THIRD, "20")),
         ),
         runtime_checks=(
             RuntimeCheck("name", "name()(string)"),
@@ -453,8 +553,11 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
             RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
+            RuntimeCheck("third-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_THIRD)),
             RuntimeCheck("reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_SPENDER, DEFAULT_SENDER)),
+            RuntimeCheck("third-reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_THIRD, DEFAULT_SENDER)),
             RuntimeCheck("nonce", "nonces(address)(uint256)", (DEFAULT_SENDER,)),
+            RuntimeCheck("spender-nonce", "nonces(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("permit-typehash", "PERMIT_TYPEHASH()(bytes32)"),
         ),
     ),
