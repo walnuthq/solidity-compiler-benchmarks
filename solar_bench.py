@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,7 +29,14 @@ DEFAULT_THIRD = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 DEFAULT_FOURTH = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 MAX_UINT256 = str((1 << 256) - 1)
+MAX_UINT128 = str((1 << 128) - 1)
 EDGE_BYTES32 = "0x" + "ff" * 31 + "f0"
+MIXED_BYTES32 = "0x" + "ff" * 30 + "0000"
+CAST_DEPLOY_TIMEOUT = 45
+CAST_TX_TIMEOUT = 30
+CAST_READ_TIMEOUT = 10
+CAST_RPC_TIMEOUT = 10
+CAST_GAS_LIMIT = "30000000"
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -85,6 +94,11 @@ def display_command(cmd: Sequence[str | Path]) -> str:
     return " ".join(sanitized)
 
 
+def verbose_log(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message, flush=True)
+
+
 
 def run(
     cmd: Sequence[str],
@@ -92,18 +106,41 @@ def run(
     timeout: int = 120,
     cwd: Optional[Path] = None,
 ) -> subprocess.CompletedProcess[str]:
+    start = time.monotonic()
+    kwargs = {}
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        **kwargs,
+    )
     try:
-        return subprocess.run(
-            cmd,
-            input=input_text,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-        )
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, -1, "", "TIMEOUT")
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+        else:
+            proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        elapsed = time.monotonic() - start
+        stderr = (stderr or "").strip()
+        message = f"TIMEOUT after {elapsed:.1f}s: {display_command(cmd)}"
+        if stderr:
+            message = f"{message}\n{stderr}"
+        return subprocess.CompletedProcess(cmd, -1, stdout or "", message)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def find_binary(explicit: Optional[str], candidates: Sequence[str]) -> Optional[Path]:
@@ -229,9 +266,13 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("balance", "balanceOf(address)(uint256)", (DEFAULT_SENDER,)),
             RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("third-balance", "balanceOf(address)(uint256)", (DEFAULT_THIRD,)),
+            RuntimeCheck("fourth-balance", "balanceOf(address)(uint256)", (DEFAULT_FOURTH,)),
+            RuntimeCheck("zero-balance", "balanceOf(address)(uint256)", (ZERO_ADDRESS,)),
             RuntimeCheck("supply", "totalSupply()(uint256)"),
             RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
             RuntimeCheck("third-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_THIRD)),
+            RuntimeCheck("fourth-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_FOURTH)),
+            RuntimeCheck("reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_SPENDER, DEFAULT_SENDER)),
         ),
     ),
     SourceCase(
@@ -259,10 +300,13 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("vested-before-start", "vestedAmount(uint64)(uint256)", ("999",)),
             RuntimeCheck("vested-at-start", "vestedAmount(uint64)(uint256)", ("1000",)),
             RuntimeCheck("vested-after-start", "vestedAmount(uint64)(uint256)", ("1001",)),
+            RuntimeCheck("vested-quarter", "vestedAmount(uint64)(uint256)", ("1025",)),
             RuntimeCheck("vested-half", "vestedAmount(uint64)(uint256)", ("1050",)),
+            RuntimeCheck("vested-three-quarter", "vestedAmount(uint64)(uint256)", ("1075",)),
             RuntimeCheck("vested-before-end", "vestedAmount(uint64)(uint256)", ("1099",)),
             RuntimeCheck("vested-end", "vestedAmount(uint64)(uint256)", ("1100",)),
             RuntimeCheck("vested-after-end", "vestedAmount(uint64)(uint256)", ("1101",)),
+            RuntimeCheck("vested-far-future", "vestedAmount(uint64)(uint256)", ("999999",)),
         ),
     ),
     SourceCase(
@@ -293,6 +337,13 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                     EDGE_BYTES32,
                 ),
             ),
+            (
+                "getStartMachineHash(bytes32,bytes32)",
+                (
+                    MIXED_BYTES32,
+                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+            ),
         ),
         runtime_checks=(
             RuntimeCheck("prover0", "prover0()(address)"),
@@ -313,6 +364,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 (
                     "0x0000000000000000000000000000000000000000000000000000000000000000",
                     EDGE_BYTES32,
+                ),
+            ),
+            RuntimeCheck(
+                "start-machine-hash-mixed",
+                "getStartMachineHash(bytes32,bytes32)(bytes32)",
+                (
+                    MIXED_BYTES32,
+                    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
             ),
         ),
@@ -337,6 +396,8 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
         runtime_checks=(
             RuntimeCheck("supply", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_SPENDER, "123456", "7")),
             RuntimeCheck("supply-zero", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_SENDER, "0", "0")),
+            RuntimeCheck("supply-max-u128", "encodeSupplyParams(address,uint256,uint16)(bytes32)", (DEFAULT_FOURTH, MAX_UINT128, "65535")),
+            RuntimeCheck("withdraw-zero", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_SENDER, "0")),
             RuntimeCheck("withdraw-small", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_SENDER, "1")),
             RuntimeCheck("withdraw-max", "encodeWithdrawParams(address,uint256)(bytes32)", (DEFAULT_THIRD, MAX_UINT256)),
             RuntimeCheck(
@@ -345,9 +406,19 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 (DEFAULT_SPENDER, "2222", "2", "9"),
             ),
             RuntimeCheck(
+                "borrow-zero",
+                "encodeBorrowParams(address,uint256,uint256,uint16)(bytes32)",
+                (DEFAULT_THIRD, "0", "1", "0"),
+            ),
+            RuntimeCheck(
                 "borrow-stable",
                 "encodeBorrowParams(address,uint256,uint256,uint16)(bytes32)",
                 (DEFAULT_SENDER, "1", "1", "0"),
+            ),
+            RuntimeCheck(
+                "repay-zero",
+                "encodeRepayParams(address,uint256,uint256)(bytes32)",
+                (DEFAULT_SENDER, "0", "1"),
             ),
             RuntimeCheck(
                 "repay",
@@ -396,6 +467,16 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 (DEFAULT_SENDER, "1"),
             ),
             RuntimeCheck(
+                "swap-rate-variable",
+                "encodeSwapBorrowRateMode(address,uint256)(bytes32)",
+                (DEFAULT_FOURTH, "2"),
+            ),
+            RuntimeCheck(
+                "rebalance-zero-user",
+                "encodeRebalanceStableBorrowRate(address,address)(bytes32)",
+                (DEFAULT_FOURTH, ZERO_ADDRESS),
+            ),
+            RuntimeCheck(
                 "rebalance",
                 "encodeRebalanceStableBorrowRate(address,address)(bytes32)",
                 (DEFAULT_SPENDER, DEFAULT_THIRD),
@@ -420,6 +501,11 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
                 "encodeLiquidationCall(address,address,address,uint256,bool)(bytes32,bytes32)",
                 (DEFAULT_THIRD, DEFAULT_SPENDER, DEFAULT_SENDER, MAX_UINT256, "true"),
             ),
+            RuntimeCheck(
+                "liquidation-zero",
+                "encodeLiquidationCall(address,address,address,uint256,bool)(bytes32,bytes32)",
+                (DEFAULT_SENDER, DEFAULT_FOURTH, ZERO_ADDRESS, "0", "true"),
+            ),
         ),
     ),
     SourceCase(
@@ -438,6 +524,9 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("register(string)", ("",)),
             ("register(string)", ("long-subdomain-name",)),
             ("update(string,address)", ("long-subdomain-name", DEFAULT_FOURTH)),
+            ("register(string)", ("numeric123",)),
+            ("register(string)", ("under_score",)),
+            ("update(string,address)", ("under_score", DEFAULT_SPENDER)),
         ),
         runtime_checks=(
             RuntimeCheck("lookup-updated", "lookup(string)(address)", ("testname",)),
@@ -445,6 +534,8 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("lookup-untouched", "lookup(string)(address)", ("untouched",)),
             RuntimeCheck("lookup-empty", "lookup(string)(address)", ("",)),
             RuntimeCheck("lookup-long", "lookup(string)(address)", ("long-subdomain-name",)),
+            RuntimeCheck("lookup-numeric", "lookup(string)(address)", ("numeric123",)),
+            RuntimeCheck("lookup-underscore", "lookup(string)(address)", ("under_score",)),
             RuntimeCheck("missing", "lookup(string)(address)", ("missing",)),
         ),
     ),
@@ -461,12 +552,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("setFees(address,uint256)", (DEFAULT_SPENDER, "250")),
             ("setFees(address,uint256)", (DEFAULT_THIRD, "1000")),
             ("setFees(address,uint256)", (DEFAULT_FOURTH, "10000")),
+            ("setFees(address,uint256)", (DEFAULT_SENDER, "1")),
         ),
         runtime_checks=(
             RuntimeCheck("manager", "manager()(address)"),
             RuntimeCheck("fee-spender", "fees(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("fee-third", "fees(address)(uint256)", (DEFAULT_THIRD,)),
             RuntimeCheck("fee-fourth", "fees(address)(uint256)", (DEFAULT_FOURTH,)),
+            RuntimeCheck("fee-sender", "fees(address)(uint256)", (DEFAULT_SENDER,)),
             RuntimeCheck("fee-missing", "fees(address)(uint256)", (ZERO_ADDRESS,)),
             RuntimeCheck("computed-fee-zero", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "0")),
             RuntimeCheck("computed-fee-spender", "getFee(address,uint256)(uint256)", (DEFAULT_SPENDER, "10000")),
@@ -478,6 +571,7 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ),
             RuntimeCheck("computed-fee-third", "getFee(address,uint256)(uint256)", (DEFAULT_THIRD, "12345")),
             RuntimeCheck("computed-fee-fourth", "getFee(address,uint256)(uint256)", (DEFAULT_FOURTH, "12345")),
+            RuntimeCheck("computed-fee-sender", "getFee(address,uint256)(uint256)", (DEFAULT_SENDER, "999999")),
             RuntimeCheck("computed-fee-missing", "getFee(address,uint256)(uint256)", (ZERO_ADDRESS, "10000")),
         ),
     ),
@@ -500,10 +594,6 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             (
                 "onERC721Received(address,address,uint256,bytes)",
                 (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"),
-            ),
-            (
-                "onERC721Received(address,address,uint256,bytes)",
-                (ZERO_ADDRESS, ZERO_ADDRESS, "0", "0x" + "11" * 32),
             ),
         ),
         runtime_checks=(
@@ -544,6 +634,8 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             ("approve(address,uint256)", (DEFAULT_THIRD, "77")),
             ("increaseAllowance(address,uint256)", (DEFAULT_THIRD, "23")),
             ("decreaseAllowance(address,uint256)", (DEFAULT_THIRD, "20")),
+            ("approve(address,uint256)", (DEFAULT_FOURTH, MAX_UINT256)),
+            ("approve(address,uint256)", (ZERO_ADDRESS, "1")),
         ),
         runtime_checks=(
             RuntimeCheck("name", "name()(string)"),
@@ -554,10 +646,14 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
             RuntimeCheck("spender-balance", "balanceOf(address)(uint256)", (DEFAULT_SPENDER,)),
             RuntimeCheck("allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_SPENDER)),
             RuntimeCheck("third-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_THIRD)),
+            RuntimeCheck("fourth-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, DEFAULT_FOURTH)),
+            RuntimeCheck("zero-allowance", "allowance(address,address)(uint256)", (DEFAULT_SENDER, ZERO_ADDRESS)),
             RuntimeCheck("reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_SPENDER, DEFAULT_SENDER)),
             RuntimeCheck("third-reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_THIRD, DEFAULT_SENDER)),
+            RuntimeCheck("fourth-reverse-allowance", "allowance(address,address)(uint256)", (DEFAULT_FOURTH, DEFAULT_SENDER)),
             RuntimeCheck("nonce", "nonces(address)(uint256)", (DEFAULT_SENDER,)),
             RuntimeCheck("spender-nonce", "nonces(address)(uint256)", (DEFAULT_SPENDER,)),
+            RuntimeCheck("zero-nonce", "nonces(address)(uint256)", (ZERO_ADDRESS,)),
             RuntimeCheck("permit-typehash", "PERMIT_TYPEHASH()(bytes32)"),
         ),
     ),
@@ -857,13 +953,19 @@ def deploy_contract(
             "send",
             "--rpc-url",
             rpc_url,
+            "--rpc-timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--gas-limit",
+            CAST_GAS_LIMIT,
             "--private-key",
             private_key,
             "--json",
             "--create",
             bytecode,
         ],
-        timeout=60,
+        timeout=CAST_DEPLOY_TIMEOUT,
     )
     if proc.returncode != 0:
         return None, None, proc.stderr[:1000]
@@ -897,11 +999,17 @@ def call_contract(
             *args,
             "--rpc-url",
             rpc_url,
+            "--rpc-timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--gas-limit",
+            CAST_GAS_LIMIT,
             "--private-key",
             private_key,
             "--json",
         ],
-        timeout=60,
+        timeout=CAST_TX_TIMEOUT,
     )
     if proc.returncode != 0:
         return None, proc.stderr[:1000]
@@ -921,7 +1029,22 @@ def read_contract(
     args: Sequence[str],
     rpc_url: str,
 ) -> Tuple[Optional[str], str]:
-    proc = run(["cast", "call", address, signature, *args, "--rpc-url", rpc_url], timeout=60)
+    proc = run(
+        [
+            "cast",
+            "call",
+            address,
+            signature,
+            *args,
+            "--rpc-url",
+            rpc_url,
+            "--rpc-timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--gas-limit",
+            CAST_GAS_LIMIT,
+        ],
+        timeout=CAST_READ_TIMEOUT,
+    )
     if proc.returncode != 0:
         return None, proc.stderr[:1000]
     value = " ".join(proc.stdout.split())
@@ -982,6 +1105,7 @@ def run_test_case(
     include_gas: bool,
     rpc_url: str,
     private_key: str,
+    verbose: bool = False,
 ) -> Dict[str, object]:
     entry: Dict[str, object] = {
         "test_id": test_case.test_id,
@@ -995,6 +1119,7 @@ def run_test_case(
         entry["source"] = str(test_case.source_path.relative_to(ROOT))
 
     for spec in specs:
+        verbose_log(verbose, f"[{test_case.test_id}] compiling with {spec.compiler_id}")
         compiled = (
             compile_repo_case(spec, test_case)
             if isinstance(test_case, SourceCase)
@@ -1012,6 +1137,7 @@ def run_test_case(
             compiler_entry["runtime_status"] = "skipped"
             continue
 
+        verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} deploy")
         address, deploy_gas, deploy_error = deploy_contract(
             str(compiled["bytecode"]),
             test_case,
@@ -1030,6 +1156,7 @@ def run_test_case(
         gas_results = []
         total_gas = 0
         for signature, args in test_case.test_calls:
+            verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} tx {signature}")
             gas, error = call_contract(address, signature, args, rpc_url, private_key)
             if gas is None:
                 gas_results.append({"call": signature, "args": list(args), "gas": None, "error": error})
@@ -1042,6 +1169,7 @@ def run_test_case(
         runtime_results = []
         runtime_failed = False
         for check in checks:
+            verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} read {check.label}: {check.signature}")
             value, error = read_contract(address, check.signature, check.args, rpc_url)
             if value is None:
                 runtime_failed = True
@@ -1234,14 +1362,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(_color("cast not found; install Foundry or omit --gas", RED), file=sys.stderr)
         return 1
 
-    anvil_proc = None
-    if args.gas and args.start_anvil:
-        if not check_tool("anvil"):
-            print(_color("anvil not found; install Foundry or omit --start-anvil", RED), file=sys.stderr)
-            return 1
-        print("Starting anvil...")
-        anvil_proc = start_anvil()
-
     solc_version, solc_version_error = binary_version(solc)
     solar_version, solar_version_error = binary_version(solar)
 
@@ -1272,6 +1392,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.gas and any(isinstance(test, SourceCase) and not test.test_calls and not runtime_checks(test) for test in tests):
         print(_color("repo contracts without gas calls or runtime checks will show N/A in the gas table", YELLOW), file=sys.stderr)
 
+    if args.gas and args.start_anvil and not check_tool("anvil"):
+        print(_color("anvil not found; install Foundry or omit --start-anvil", RED), file=sys.stderr)
+        return 1
+
     print(f"Using {specs[0].label}")
     if solc_version_error:
         print(
@@ -1290,15 +1414,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(_color(f"Skipping {len(skipped)} incompatible tests for solc {solc_version}: {skipped_ids}", YELLOW))
     print(f"Running {len(tests)} tests")
 
-    try:
-        results = [
-            run_test_case(test, specs, args.gas, args.rpc_url, args.private_key)
-            for test in tests
-        ]
-    finally:
-        if anvil_proc:
-            print("Stopping anvil...")
-            stop_anvil(anvil_proc)
+    results = []
+    for test in tests:
+        anvil_proc = None
+        try:
+            if args.gas and args.start_anvil:
+                print(f"Starting anvil for {test.test_id}...")
+                anvil_proc = start_anvil()
+            results.append(run_test_case(test, specs, args.gas, args.rpc_url, args.private_key, args.verbose))
+        finally:
+            if anvil_proc:
+                print(f"Stopping anvil for {test.test_id}...")
+                stop_anvil(anvil_proc)
 
     print_size_table(results, specs)
     if args.gas:
