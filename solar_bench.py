@@ -210,6 +210,14 @@ class RuntimeCheck:
 
 
 @dataclass(frozen=True)
+class GasCall:
+    label: str
+    signature: str
+    args: Sequence[str] = field(default_factory=tuple)
+    repeat: int = 1
+
+
+@dataclass(frozen=True)
 class SourceCase:
     test_id: str
     description: str
@@ -660,6 +668,176 @@ REPO_TEST_CASES: Sequence[SourceCase] = (
 )
 
 
+HOT_GAS_CALLS: Dict[str, Sequence[GasCall]] = {
+    "factorial": (
+        GasCall("factorial-5", "computeFactorial(uint256)", ("5",)),
+        GasCall("factorial-10", "computeFactorial(uint256)", ("10",)),
+        GasCall("factorial-20", "computeFactorial(uint256)", ("20",)),
+        GasCall("factorial-30", "computeFactorial(uint256)", ("30",)),
+        GasCall("factorial-40", "computeFactorial(uint256)", ("40",)),
+        GasCall("factorial-50", "computeFactorial(uint256)", ("50",)),
+    ),
+    "counter": (
+        GasCall("increment-10", "increment(uint256)", ("10",)),
+        GasCall("reset", "reset()"),
+        GasCall("increment-50", "increment(uint256)", ("50",)),
+        GasCall("reset-again", "reset()"),
+        GasCall("increment-100", "increment(uint256)", ("100",)),
+    ),
+    "sum-array": (
+        GasCall("sum-1-10", "sumRange(uint256,uint256)", ("1", "10")),
+        GasCall("sum-1-50", "sumRange(uint256,uint256)", ("1", "50")),
+        GasCall("sum-1-100", "sumRange(uint256,uint256)", ("1", "100")),
+        GasCall("sum-10-200", "sumRange(uint256,uint256)", ("10", "200")),
+    ),
+    "arithmetic": (
+        GasCall("compute-10", "compute(uint256,uint256,uint256)", ("100", "3", "10")),
+        GasCall("compute-50", "compute(uint256,uint256,uint256)", ("100", "3", "50")),
+        GasCall("compute-100", "compute(uint256,uint256,uint256)", ("777", "9", "100")),
+    ),
+    "openzeppelin-erc20-mock": (
+        GasCall("mint-sender-1000", "mint(address,uint256)", (DEFAULT_SENDER, "1000")),
+        GasCall("mint-spender-250", "mint(address,uint256)", (DEFAULT_SPENDER, "250")),
+        GasCall("transfer-third-125", "transfer(address,uint256)", (DEFAULT_THIRD, "125")),
+        GasCall("transfer-fourth-25", "transfer(address,uint256)", (DEFAULT_FOURTH, "25")),
+        GasCall("approve-spender-250", "approve(address,uint256)", (DEFAULT_SPENDER, "250")),
+        GasCall("approve-third-77", "approve(address,uint256)", (DEFAULT_THIRD, "77")),
+        GasCall("burn-sender-400", "burn(address,uint256)", (DEFAULT_SENDER, "400")),
+        GasCall("transfer-spender-50", "transfer(address,uint256)", (DEFAULT_SPENDER, "50")),
+    ),
+    "openzeppelin-vesting-wallet": (
+        GasCall("vested-before-start", "vestedAmount(uint64)", ("999",), repeat=2),
+        GasCall("vested-start", "vestedAmount(uint64)", ("1000",), repeat=2),
+        GasCall("vested-quarter", "vestedAmount(uint64)", ("1025",), repeat=2),
+        GasCall("vested-half", "vestedAmount(uint64)", ("1050",), repeat=2),
+        GasCall("vested-three-quarter", "vestedAmount(uint64)", ("1075",), repeat=2),
+        GasCall("vested-end", "vestedAmount(uint64)", ("1100",), repeat=2),
+        GasCall("vested-future", "vestedAmount(uint64)", ("999999",), repeat=2),
+        GasCall("releasable", "releasable()", repeat=2),
+    ),
+    "nitro-one-step-proof": (
+        GasCall("prover0", "prover0()", repeat=2),
+        GasCall("prover-mem", "proverMem()", repeat=2),
+        GasCall("prover-math", "proverMath()", repeat=2),
+        GasCall("prover-host-io", "proverHostIo()", repeat=2),
+        GasCall(
+            "start-machine-small",
+            "getStartMachineHash(bytes32,bytes32)",
+            (
+                "0x0000000000000000000000000000000000000000000000000000000000000011",
+                "0x0000000000000000000000000000000000000000000000000000000000000022",
+            ),
+            repeat=2,
+        ),
+        GasCall(
+            "start-machine-edge",
+            "getStartMachineHash(bytes32,bytes32)",
+            (
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                EDGE_BYTES32,
+            ),
+            repeat=2,
+        ),
+        GasCall(
+            "start-machine-mixed",
+            "getStartMachineHash(bytes32,bytes32)",
+            (MIXED_BYTES32, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            repeat=2,
+        ),
+    ),
+    "aave-l2-encoder": (
+        GasCall("pool", "POOL()", repeat=2),
+        GasCall("supply", "encodeSupplyParams(address,uint256,uint16)", (DEFAULT_SPENDER, "123456", "7"), repeat=2),
+        GasCall("supply-zero", "encodeSupplyParams(address,uint256,uint16)", (DEFAULT_SENDER, "0", "0"), repeat=2),
+        GasCall("supply-max", "encodeSupplyParams(address,uint256,uint16)", (DEFAULT_FOURTH, MAX_UINT128, "65535")),
+        GasCall("withdraw-zero", "encodeWithdrawParams(address,uint256)", (DEFAULT_SENDER, "0")),
+        GasCall("withdraw-max", "encodeWithdrawParams(address,uint256)", (DEFAULT_THIRD, MAX_UINT256), repeat=2),
+        GasCall("borrow", "encodeBorrowParams(address,uint256,uint256,uint16)", (DEFAULT_SPENDER, "2222", "2", "9"), repeat=2),
+        GasCall("borrow-zero", "encodeBorrowParams(address,uint256,uint256,uint16)", (DEFAULT_THIRD, "0", "1", "0")),
+        GasCall("repay", "encodeRepayParams(address,uint256,uint256)", (DEFAULT_THIRD, "3333", "1"), repeat=2),
+        GasCall("repay-max", "encodeRepayParams(address,uint256,uint256)", (DEFAULT_FOURTH, MAX_UINT256, "2")),
+        GasCall("repay-atokens", "encodeRepayWithATokensParams(address,uint256,uint256)", (DEFAULT_FOURTH, MAX_UINT256, "2")),
+        GasCall("swap-rate", "encodeSwapBorrowRateMode(address,uint256)", (DEFAULT_SENDER, "1"), repeat=2),
+        GasCall("collateral-true", "encodeSetUserUseReserveAsCollateral(address,bool)", (DEFAULT_THIRD, "true")),
+        GasCall("collateral-false", "encodeSetUserUseReserveAsCollateral(address,bool)", (DEFAULT_THIRD, "false")),
+        GasCall(
+            "liquidation",
+            "encodeLiquidationCall(address,address,address,uint256,bool)",
+            (DEFAULT_SPENDER, DEFAULT_THIRD, DEFAULT_FOURTH, "5555", "false"),
+        ),
+        GasCall(
+            "liquidation-max",
+            "encodeLiquidationCall(address,address,address,uint256,bool)",
+            (DEFAULT_THIRD, DEFAULT_SPENDER, DEFAULT_SENDER, MAX_UINT256, "true"),
+        ),
+    ),
+    "lilweb3-ens": (
+        GasCall("register-testname", "register(string)", ("testname",)),
+        GasCall("update-testname", "update(string,address)", ("testname", DEFAULT_SPENDER)),
+        GasCall("register-second", "register(string)", ("second",)),
+        GasCall("update-second", "update(string,address)", ("second", DEFAULT_THIRD)),
+        GasCall("register-untouched", "register(string)", ("untouched",)),
+        GasCall("register-empty", "register(string)", ("",)),
+        GasCall("register-long", "register(string)", ("long-subdomain-name",)),
+        GasCall("update-long", "update(string,address)", ("long-subdomain-name", DEFAULT_FOURTH)),
+        GasCall("register-numeric", "register(string)", ("numeric123",)),
+        GasCall("register-underscore", "register(string)", ("under_score",)),
+        GasCall("update-underscore", "update(string,address)", ("under_score", DEFAULT_SPENDER)),
+        GasCall("register-very-long", "register(string)", ("very-long-subdomain-name-with-more-bytes",)),
+    ),
+    "lilweb3-flashloan": (
+        GasCall("manager", "manager()", repeat=2),
+        GasCall("set-fee-spender", "setFees(address,uint256)", (DEFAULT_SPENDER, "250")),
+        GasCall("set-fee-third", "setFees(address,uint256)", (DEFAULT_THIRD, "1000")),
+        GasCall("set-fee-fourth", "setFees(address,uint256)", (DEFAULT_FOURTH, "10000")),
+        GasCall("set-fee-sender", "setFees(address,uint256)", (DEFAULT_SENDER, "1")),
+        GasCall("get-fee-zero", "getFee(address,uint256)", (DEFAULT_SPENDER, "0"), repeat=2),
+        GasCall("get-fee-spender", "getFee(address,uint256)", (DEFAULT_SPENDER, "10000"), repeat=2),
+        GasCall("get-fee-rounded", "getFee(address,uint256)", (DEFAULT_SPENDER, "33333"), repeat=2),
+        GasCall("get-fee-third", "getFee(address,uint256)", (DEFAULT_THIRD, "12345"), repeat=2),
+        GasCall("get-fee-fourth", "getFee(address,uint256)", (DEFAULT_FOURTH, "12345"), repeat=2),
+        GasCall("get-fee-missing", "getFee(address,uint256)", (ZERO_ADDRESS, "10000")),
+    ),
+    "lilweb3-fractional": (
+        GasCall("get-vault-zero", "getVault(uint256)", ("0",), repeat=2),
+        GasCall("get-vault-one", "getVault(uint256)", ("1",), repeat=2),
+        GasCall("get-vault-42", "getVault(uint256)", ("42",), repeat=2),
+        GasCall("get-vault-max", "getVault(uint256)", (MAX_UINT256,)),
+        GasCall("erc721-empty", "onERC721Received(address,address,uint256,bytes)", (DEFAULT_SENDER, DEFAULT_SPENDER, "7", "0x"), repeat=2),
+        GasCall("erc721-nonempty", "onERC721Received(address,address,uint256,bytes)", (DEFAULT_THIRD, DEFAULT_FOURTH, "42", "0x123456"), repeat=2),
+        GasCall("erc721-word", "onERC721Received(address,address,uint256,bytes)", (ZERO_ADDRESS, ZERO_ADDRESS, "0", "0x" + "11" * 32)),
+    ),
+    "maple-erc20": (
+        GasCall("approve-spender-100", "approve(address,uint256)", (DEFAULT_SPENDER, "100")),
+        GasCall("increase-spender-50", "increaseAllowance(address,uint256)", (DEFAULT_SPENDER, "50")),
+        GasCall("decrease-spender-20", "decreaseAllowance(address,uint256)", (DEFAULT_SPENDER, "20")),
+        GasCall("increase-spender-70", "increaseAllowance(address,uint256)", (DEFAULT_SPENDER, "70")),
+        GasCall("decrease-spender-30", "decreaseAllowance(address,uint256)", (DEFAULT_SPENDER, "30")),
+        GasCall("approve-third-77", "approve(address,uint256)", (DEFAULT_THIRD, "77")),
+        GasCall("increase-third-23", "increaseAllowance(address,uint256)", (DEFAULT_THIRD, "23")),
+        GasCall("decrease-third-20", "decreaseAllowance(address,uint256)", (DEFAULT_THIRD, "20")),
+        GasCall("approve-fourth-900", "approve(address,uint256)", (DEFAULT_FOURTH, "900")),
+        GasCall("increase-fourth-100", "increaseAllowance(address,uint256)", (DEFAULT_FOURTH, "100")),
+        GasCall("decrease-fourth-50", "decreaseAllowance(address,uint256)", (DEFAULT_FOURTH, "50")),
+        GasCall("approve-fourth-max", "approve(address,uint256)", (DEFAULT_FOURTH, MAX_UINT256)),
+        GasCall("approve-zero-1", "approve(address,uint256)", (ZERO_ADDRESS, "1")),
+    ),
+}
+
+
+def default_gas_calls(test_case: TestCase | SourceCase) -> Sequence[GasCall]:
+    return tuple(
+        GasCall(signature, signature, tuple(args))
+        for signature, args in test_case.test_calls
+    )
+
+
+def gas_calls(test_case: TestCase | SourceCase, profile: str) -> Sequence[GasCall]:
+    if profile == "hot":
+        return HOT_GAS_CALLS.get(test_case.test_id, default_gas_calls(test_case))
+    return default_gas_calls(test_case)
+
+
 MICRO_RUNTIME_CHECKS: Dict[str, Sequence[RuntimeCheck]] = {
     "factorial": (RuntimeCheck("result", "getResult()(uint256)"),),
     "counter": (RuntimeCheck("count", "count()(uint256)"),),
@@ -1103,6 +1281,7 @@ def run_test_case(
     test_case: TestCase | SourceCase,
     specs: Sequence[CompilerSpec],
     include_gas: bool,
+    gas_profile: str,
     rpc_url: str,
     private_key: str,
     verbose: bool = False,
@@ -1112,6 +1291,7 @@ def run_test_case(
         "description": test_case.description,
         "contract_name": test_case.contract_name,
         "suite": "repo" if isinstance(test_case, SourceCase) else "micro",
+        "gas_profile": gas_profile,
         "compilers": {},
     }
     if isinstance(test_case, SourceCase):
@@ -1130,9 +1310,10 @@ def run_test_case(
         entry["compilers"][spec.compiler_id] = compiler_entry
 
         checks = runtime_checks(test_case)
+        calls = gas_calls(test_case, gas_profile)
         if compiled["status"] != "ok" or not include_gas:
             continue
-        if not test_case.test_calls and not checks:
+        if not calls and not checks:
             compiler_entry["deploy_status"] = "skipped"
             compiler_entry["runtime_status"] = "skipped"
             continue
@@ -1155,14 +1336,27 @@ def run_test_case(
         compiler_entry["address"] = address
         gas_results = []
         total_gas = 0
-        for signature, args in test_case.test_calls:
-            verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} tx {signature}")
-            gas, error = call_contract(address, signature, args, rpc_url, private_key)
-            if gas is None:
-                gas_results.append({"call": signature, "args": list(args), "gas": None, "error": error})
-                continue
-            gas_results.append({"call": signature, "args": list(args), "gas": gas})
-            total_gas += gas
+        for call in calls:
+            for index in range(call.repeat):
+                label = call.label if call.repeat == 1 else f"{call.label}#{index + 1}"
+                verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} tx {label}: {call.signature}")
+                gas, error = call_contract(address, call.signature, call.args, rpc_url, private_key)
+                if gas is None:
+                    gas_results.append({
+                        "label": label,
+                        "call": call.signature,
+                        "args": list(call.args),
+                        "gas": None,
+                        "error": error,
+                    })
+                    continue
+                gas_results.append({
+                    "label": label,
+                    "call": call.signature,
+                    "args": list(call.args),
+                    "gas": gas,
+                })
+                total_gas += gas
         compiler_entry["gas_results"] = gas_results
         compiler_entry["total_gas"] = total_gas
 
@@ -1288,6 +1482,65 @@ def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[Compil
         print(row)
 
 
+def print_gas_breakdown_table(results: Sequence[Dict[str, object]], specs: Sequence[CompilerSpec]) -> None:
+    print("\n" + _color("Per-call Gas Breakdown", BOLD))
+    for result in results:
+        if not result.get("compilers"):
+            continue
+        rows_by_compiler = {
+            spec.compiler_id: result["compilers"].get(spec.compiler_id, {}).get("gas_results") or []
+            for spec in specs
+        }
+        if not any(rows_by_compiler.values()):
+            continue
+
+        print(f"\n{result['test_id']}")
+        label_width = max(
+            12,
+            *(
+                visible_len(str(row.get("label") or row.get("call") or ""))
+                for rows in rows_by_compiler.values()
+                for row in rows
+            ),
+        )
+        header = f"{'Call':<{label_width}}"
+        for spec in specs:
+            header += f" | {spec.compiler_id:<13}"
+        header += " | Solar vs solc"
+        print(header)
+        print("-" * len(header))
+
+        max_len = max((len(rows) for rows in rows_by_compiler.values()), default=0)
+        for index in range(max_len):
+            label = ""
+            values = []
+            row = None
+            for spec in specs:
+                rows = rows_by_compiler.get(spec.compiler_id) or []
+                if index < len(rows):
+                    row = rows[index]
+                    label = label or str(row.get("label") or row.get("call") or "")
+                    break
+            line = f"{label:<{label_width}}"
+            for spec in specs:
+                rows = rows_by_compiler.get(spec.compiler_id) or []
+                if index >= len(rows):
+                    values.append(0)
+                    line += f" | {pad_cell(_color('N/A', YELLOW), 13)}"
+                    continue
+                row = rows[index]
+                gas = row.get("gas")
+                if gas is None:
+                    values.append(0)
+                    line += f" | {pad_cell(_color('ERR', RED), 13)}"
+                else:
+                    gas_int = int(gas)
+                    values.append(gas_int)
+                    line += f" | {gas_int:<13,}"
+            line += f" | {pct_delta(values[0], values[1]) if len(values) >= 2 else 'N/A'}"
+            print(line)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Benchmark solc vs Solar codegen on inline and repository contracts"
@@ -1307,6 +1560,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Run repo contracts even when their pragma is incompatible with the selected solc",
     )
     parser.add_argument("--gas", action="store_true", help="Deploy, execute gas calls, and compare runtime results with cast/anvil")
+    parser.add_argument(
+        "--gas-profile",
+        choices=("smoke", "hot"),
+        default="smoke",
+        help="Gas workload profile: smoke preserves the existing calls, hot runs a broader optimizer workload",
+    )
+    parser.add_argument("--gas-breakdown", action="store_true", help="Print per-call gas results")
     parser.add_argument("--start-anvil", action="store_true", help="Start anvil automatically for --gas")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help=f"RPC URL (default: {DEFAULT_RPC_URL})")
     parser.add_argument("--private-key", default=DEFAULT_PRIVATE_KEY, help="Private key for transactions")
@@ -1389,7 +1649,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 compatible_tests.append(test)
         tests = compatible_tests
 
-    if args.gas and any(isinstance(test, SourceCase) and not test.test_calls and not runtime_checks(test) for test in tests):
+    if args.gas and any(isinstance(test, SourceCase) and not gas_calls(test, args.gas_profile) and not runtime_checks(test) for test in tests):
         print(_color("repo contracts without gas calls or runtime checks will show N/A in the gas table", YELLOW), file=sys.stderr)
 
     if args.gas and args.start_anvil and not check_tool("anvil"):
@@ -1421,7 +1681,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.gas and args.start_anvil:
                 print(f"Starting anvil for {test.test_id}...")
                 anvil_proc = start_anvil()
-            results.append(run_test_case(test, specs, args.gas, args.rpc_url, args.private_key, args.verbose))
+            results.append(run_test_case(test, specs, args.gas, args.gas_profile, args.rpc_url, args.private_key, args.verbose))
         finally:
             if anvil_proc:
                 print(f"Stopping anvil for {test.test_id}...")
@@ -1431,6 +1691,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.gas:
         print_runtime_table(results)
         print_gas_table(results, specs)
+        if args.gas_breakdown or args.gas_profile == "hot":
+            print_gas_breakdown_table(results, specs)
 
     if args.verbose:
         for result in results:

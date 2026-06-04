@@ -99,6 +99,14 @@ Run gas comparison and runtime result checks with a managed Anvil instance:
 ./solar_bench.py --solar ../solar/target/debug/solar --gas --start-anvil
 ```
 
+The default gas workload is the `smoke` profile. It keeps the original small transaction sequence for each benchmark and is mainly useful as a quick differential check.
+
+Use the `hot` profile when tracking optimizer wins. It runs broader stateful workloads, repeats selected hot calls, and prints a per-call gas breakdown by default:
+
+```bash
+./solar_bench.py --solar ../solar/target/debug/solar --suite repo --gas --gas-profile hot --start-anvil
+```
+
 Runtime checks are curated per benchmark. They deploy both compiler outputs, run the configured transactions, then compare read-only results such as public storage getters. Mismatches are printed in verbose mode and recorded in `runtime_mismatches` in the JSON output.
 
 If `solc` is managed by `solc-select`, select or install a concrete version before running:
