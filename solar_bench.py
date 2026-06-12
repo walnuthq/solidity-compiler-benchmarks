@@ -921,8 +921,13 @@ def compile_standard_json(spec: CompilerSpec, test_case: TestCase) -> Dict[str, 
         "runtime_size": 0,
         "error": "",
     }
-    proc = run([str(spec.path), "--standard-json"], input_text=standard_json_input(test_case), timeout=120)
-    result["command"] = f"{display_path(spec.path)} --standard-json"
+    sj_cmd = [str(spec.path)]
+    if spec.kind != "solc":
+        # Solar gates its experimental code generator behind `-Zcodegen`.
+        sj_cmd.append("-Zcodegen")
+    sj_cmd.append("--standard-json")
+    proc = run(sj_cmd, input_text=standard_json_input(test_case), timeout=120)
+    result["command"] = display_command(sj_cmd)
     if proc.returncode != 0:
         result["status"] = "failed"
         result["error"] = (proc.stderr or proc.stdout or "compiler failed")[:1000]
@@ -1045,6 +1050,7 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
         else:
             cmd = [
                 str(spec.path),
+                "-Zcodegen",
                 "--emit",
                 "abi,bin,bin-runtime",
                 "--base-path",
