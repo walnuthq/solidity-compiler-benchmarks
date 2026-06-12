@@ -1151,14 +1151,22 @@ def deploy_contract(
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         return None, None, f"invalid deploy JSON: {exc}"
+    status = parse_receipt_int(data.get("status"))
     gas = data.get("gasUsed")
-    if isinstance(gas, str):
-        deploy_gas = int(gas, 16) if gas.startswith("0x") else int(gas)
-    elif gas is None:
-        deploy_gas = None
-    else:
-        deploy_gas = int(gas)
+    deploy_gas = parse_receipt_int(gas)
+    if status is not None and status != 1:
+        return None, deploy_gas, f"deploy transaction failed (status={status}, gasUsed={deploy_gas})"
+    if deploy_gas is None:
+        return None, None, "deploy receipt missing gasUsed"
     return data.get("contractAddress"), deploy_gas, ""
+
+
+def parse_receipt_int(value: object) -> Optional[int]:
+    if isinstance(value, str):
+        return int(value, 16) if value.startswith("0x") else int(value)
+    if value is None:
+        return None
+    return int(value)
 
 
 def call_contract(
@@ -1195,10 +1203,13 @@ def call_contract(
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         return None, f"invalid call JSON: {exc}"
-    gas = data.get("gasUsed")
-    if isinstance(gas, str):
-        return int(gas, 16) if gas.startswith("0x") else int(gas), ""
-    return int(gas), ""
+    status = parse_receipt_int(data.get("status"))
+    gas = parse_receipt_int(data.get("gasUsed"))
+    if status is not None and status != 1:
+        return None, f"transaction failed (status={status}, gasUsed={gas})"
+    if gas is None:
+        return None, "transaction receipt missing gasUsed"
+    return gas, ""
 
 
 def read_contract(
@@ -1336,12 +1347,14 @@ def run_test_case(
         compiler_entry["address"] = address
         gas_results = []
         total_gas = 0
+        gas_failed = False
         for call in calls:
             for index in range(call.repeat):
                 label = call.label if call.repeat == 1 else f"{call.label}#{index + 1}"
                 verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} tx {label}: {call.signature}")
                 gas, error = call_contract(address, call.signature, call.args, rpc_url, private_key)
                 if gas is None:
+                    gas_failed = True
                     gas_results.append({
                         "label": label,
                         "call": call.signature,
@@ -1358,7 +1371,8 @@ def run_test_case(
                 })
                 total_gas += gas
         compiler_entry["gas_results"] = gas_results
-        compiler_entry["total_gas"] = total_gas
+        compiler_entry["gas_status"] = "failed" if gas_failed else "ok"
+        compiler_entry["total_gas"] = None if gas_failed else total_gas
 
         runtime_results = []
         runtime_failed = False
@@ -1467,18 +1481,21 @@ def print_gas_table(results: Sequence[Dict[str, object]], specs: Sequence[Compil
         totals = []
         for spec in specs:
             data = result["compilers"].get(spec.compiler_id, {})
-            gas = int(data.get("total_gas") or 0)
+            raw_gas = data.get("total_gas")
+            gas = int(raw_gas) if raw_gas is not None else None
             totals.append(gas)
             if data.get("status") != "ok":
                 cell = _color("COMPILE_ERR", RED)
             elif data.get("deploy_status") == "failed":
                 cell = _color("DEPLOY_ERR", RED)
-            elif gas <= 0:
+            elif data.get("gas_status") == "failed":
+                cell = _color("TX_ERR", RED)
+            elif gas is None or gas <= 0:
                 cell = _color("N/A", YELLOW)
             else:
                 cell = f"{gas:,}"
             row += f" | {pad_cell(cell, 13)}"
-        row += f" | {pct_delta(totals[0], totals[1]) if len(totals) >= 2 else 'N/A'}"
+        row += f" | {pct_delta(totals[0], totals[1]) if len(totals) >= 2 and None not in totals else 'N/A'}"
         print(row)
 
 
@@ -1705,6 +1722,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             f"\n{result['test_id']} {compiler_id} runtime {check.get('label')} error:\n"
                             f"{check.get('error', '')}"
                         )
+                for gas_result in data.get("gas_results") or []:
+                    if gas_result.get("gas") is None:
+                        print(
+                            f"\n{result['test_id']} {compiler_id} tx {gas_result.get('label')} error:\n"
+                            f"{gas_result.get('error', '')}"
+                        )
             for mismatch in result.get("runtime_mismatches") or []:
                 values = ", ".join(
                     f"{compiler_id}={value}"
@@ -1728,7 +1751,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for result in results
         if result.get("runtime_status") in ("failed", "mismatch")
     ]
-    if (failed or runtime_failed) and not args.allow_failures:
+    gas_failed = [
+        (result["test_id"], compiler_id)
+        for result in results
+        for compiler_id, data in result["compilers"].items()
+        if data.get("gas_status") == "failed"
+    ]
+    if (failed or runtime_failed or gas_failed) and not args.allow_failures:
         if failed:
             print(
                 _color(f"{len(failed)} compiler runs failed; use --allow-failures to keep exit code 0", RED),
@@ -1737,6 +1766,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if runtime_failed:
             print(
                 _color(f"{len(runtime_failed)} runtime checks failed; use --allow-failures to keep exit code 0", RED),
+                file=sys.stderr,
+            )
+        if gas_failed:
+            print(
+                _color(f"{len(gas_failed)} gas transaction runs failed; use --allow-failures to keep exit code 0", RED),
                 file=sys.stderr,
             )
         return 1
