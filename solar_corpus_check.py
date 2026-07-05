@@ -307,8 +307,19 @@ def main():
                         if not ok:
                             size_failures.append((contract, size))
 
+    # Contracts whose deployment model is library linking: the standalone
+    # sweep compiles them with every public library call inlined, a
+    # configuration solc cannot even express (its library-free Pool is
+    # already 30070 B unoptimized). Report those as informational notes;
+    # their deployable (--libraries) sizes are measured below.
+    linked_models = {entry[4] for entry in LINKED_SIZE_CHECKS + LINKED_SIZE_NOTES}
     for (name, contract), size in sorted(size_warnings.items(), key=lambda kv: -kv[1]):
-        print(f"[size] warning: {contract} = {size} B (> {EIP170_LIMIT}, undeployable) [{name}]")
+        short = contract.rsplit(":", 1)[-1]
+        if short in linked_models:
+            print(f"[size] note: {contract} = {size} B fully inlined "
+                  f"(deploys via --libraries; see \"{short} (linked)\") [{name}]")
+        else:
+            print(f"[size] warning: {contract} = {size} B (> {EIP170_LIMIT}, undeployable) [{name}]")
 
     # Library-linked deployability gates.
     for label, root_rel, includes, source, contract, libs in LINKED_SIZE_CHECKS:
