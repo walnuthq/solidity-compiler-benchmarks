@@ -127,6 +127,36 @@ Results are written to `solar_results/solar_latest.json`.
 The command exits non-zero if either compiler fails a selected test or if runtime result checks mismatch. For exploratory runs where failures should be recorded but not fail the process, pass `--allow-failures`.
 
 
+## Solar eval
+
+`solar_corpus_check.py` sweeps the corpus with Solar's codegen and gates regressions that `solar_bench.py` alone does not catch. It standalone-compiles every tracked `.sol` (aave-v3-core `protocol`/`flashloan`/`misc`, nitro-contracts `osp`/`state`/`mocks`) with `-Zcodegen` and classifies each file:
+
+- `OK` — compiled cleanly
+- `DIAG` — clean compiler diagnostic (unimplemented feature, type error, ...)
+- `DEP` — missing import/dependency (standalone corpus artifact; solc fails too)
+- `ICE` — compiler panic, reported with its `file.rs:line` site (always a bug)
+- `TIMEOUT` — exceeded the per-file compile timeout
+
+It exits non-zero when any ICE appears, a must-pass project (`aave-protocol`) stops compiling all-OK, a contract known to sit near the EIP-170 limit (`OneStepProofEntry`) no longer fits under 24,576 bytes of runtime code (the bench `DEPLOY_ERR` class), or a chained bench/UI run fails.
+
+```bash
+cd solidity-compiler-benchmarks
+
+# Fast ICE sweep + must-pass + size gates (~16s, run after every change)
+./solar_corpus_check.py
+
+# Add solc cross-checking: failures that also fail in solc are corpus
+# artifacts and get filtered out, leaving only real solar gaps
+./solar_corpus_check.py --cross-check
+
+# The full gate — sweep + cross-check + the runtime bench
+# (solar_bench.py --suite repo) + solar's UI test suite
+./solar_corpus_check.py --cross-check --bench --ui
+```
+
+Defaults assume the sibling layout above (`../solar/target/debug/solar`) and a `solc-select`-managed solc 0.8.30; override with `--solar`/`--solc`. Use `--list` to see the scanned projects, `--project <name>` to run a subset, and `--verbose` for per-file status. New directories are one line each in the `PROJECTS` table at the top of the script.
+
+
 ## ETHDebug Coverage Benchmark
 
 1. Ensure you have `solc-select` and the desired compiler versions installed:
