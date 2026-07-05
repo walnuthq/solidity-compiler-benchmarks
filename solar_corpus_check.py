@@ -65,6 +65,23 @@ CRITICAL_SIZES = [
     ("nitro-osp", "OneStepProofEntry.sol", "OneStepProofEntry"),
 ]
 
+# Library-linked deployability gates: compile with --libraries (dummy
+# addresses) and require the contract to fit EIP-170, guarding the
+# delegatecall-linking size win (Pool: 92 KB inlined -> ~19 KB linked).
+# (label, project_root, includes, source, contract, libraries-spec)
+AAVE_LOGIC_LIBS = ",".join(
+    f"{name}=0x10000000000000000000000000000000000000{i:02x}"
+    for i, name in enumerate(
+        ["SupplyLogic", "BorrowLogic", "LiquidationLogic", "EModeLogic",
+         "BridgeLogic", "FlashLoanLogic", "PoolLogic", "ConfiguratorLogic"], 1)
+)
+LINKED_SIZE_CHECKS = [
+    ("Pool (linked)", "aave-v3-core", ["contracts"],
+     "contracts/protocol/pool/Pool.sol", "Pool", AAVE_LOGIC_LIBS),
+    ("PoolConfigurator (linked)", "aave-v3-core", ["contracts"],
+     "contracts/protocol/pool/PoolConfigurator.sol", "PoolConfigurator", AAVE_LOGIC_LIBS),
+]
+
 ICE_RE = re.compile(r"panicked at ([^\s,]+\.rs:\d+)")
 DEP_RE = re.compile(r"^error: file .+ not found", re.M)
 ERR_RE = re.compile(r"^(error(\[[^\]]+\])?: (?!aborting).+)$", re.M)
@@ -107,6 +124,31 @@ def compile_one(solar, root, includes, path, timeout, opt=None):
     except json.JSONDecodeError:
         pass
     return {"file": path, "status": "OK", "detail": "", "sizes": sizes}
+
+
+def linked_size_check(solar, label, root, includes, source, contract, libs, timeout):
+    cmd = [str(solar), "-Zcodegen", "--libraries", libs, "--emit", "bin-runtime",
+           "--color", "never", "--base-path", str(root)]
+    for inc in includes:
+        inc_path = root / inc
+        if inc_path.is_dir():
+            cmd += ["-I", str(inc_path)]
+    cmd.append(str(root / source))
+    env = {**os.environ, "RUST_BACKTRACE": "0"}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return (label, None, "timeout")
+    if "panicked" in (proc.stderr or ""):
+        return (label, None, "ICE")
+    try:
+        out = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return (label, None, "no output")
+    for name, c in out.get("contracts", {}).items():
+        if name.endswith(f":{contract}"):
+            return (label, len((c.get("bin-runtime") or "")) // 2, None)
+    return (label, None, "contract missing")
 
 
 def solc_also_fails(solc, root, includes, path, timeout):
@@ -249,6 +291,22 @@ def main():
 
     for (name, contract), size in sorted(size_warnings.items(), key=lambda kv: -kv[1]):
         print(f"[size] warning: {contract} = {size} B (> {EIP170_LIMIT}, undeployable) [{name}]")
+
+    # Library-linked deployability gates.
+    for label, root_rel, includes, source, contract, libs in LINKED_SIZE_CHECKS:
+        root = REPO / root_rel
+        if not (root / source).is_file():
+            continue
+        label_out, size, err = linked_size_check(
+            solar, label, root, includes, source, contract, libs, args.timeout)
+        if err is not None:
+            print(f"[size] {label_out}: FAILED ({err})")
+            size_failures.append((label_out, 0))
+        elif size <= EIP170_LIMIT:
+            print(f"[size] {label_out}: {size} B (OK, {EIP170_LIMIT - size} B spare)")
+        else:
+            print(f"[size] {label_out}: {size} B (OVER EIP-170 LIMIT by {size - EIP170_LIMIT} B)")
+            size_failures.append((label_out, size))
 
     bench_rc = ui_rc = 0
     if args.bench:
