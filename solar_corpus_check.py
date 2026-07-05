@@ -63,6 +63,13 @@ PROJECTS = [
 # (project name, defining file basename, contract name)
 CRITICAL_SIZES = [
     ("nitro-osp", "OneStepProofEntry.sol", "OneStepProofEntry"),
+    # The aave logic libraries deploy standalone; all fit in default mode
+    # since static frame overlays + shared revert-string helper landed.
+    ("aave-protocol", "BorrowLogic.sol", "BorrowLogic"),
+    ("aave-protocol", "FlashLoanLogic.sol", "FlashLoanLogic"),
+    ("aave-protocol", "LiquidationLogic.sol", "LiquidationLogic"),
+    ("aave-protocol", "SupplyLogic.sol", "SupplyLogic"),
+    ("aave-protocol", "PoolConfigurator.sol", "PoolConfigurator"),
 ]
 
 # Library-linked deployability gates: compile with --libraries (dummy
