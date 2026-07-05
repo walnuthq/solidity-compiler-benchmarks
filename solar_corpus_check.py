@@ -70,9 +70,11 @@ DEP_RE = re.compile(r"^error: file .+ not found", re.M)
 ERR_RE = re.compile(r"^(error(\[[^\]]+\])?: (?!aborting).+)$", re.M)
 
 
-def compile_one(solar, root, includes, path, timeout):
+def compile_one(solar, root, includes, path, timeout, opt=None):
     cmd = [str(solar), "-Zcodegen", "--emit", "bin-runtime", "--color", "never",
            "--base-path", str(root)]
+    if opt:
+        cmd += ["-O", opt]
     for inc in includes:
         inc_path = root / inc
         if inc_path.is_dir():
@@ -145,6 +147,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="list projects and exit")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--timeout", type=int, default=60, help="per-file compile timeout (s)")
+    ap.add_argument("--opt", choices=["none", "gas", "size"], default=None,
+                    help="pass -O <mode> to solar (default: solar's default, gas)")
     ap.add_argument("--cross-check", action="store_true",
                     help="re-run solar failures through solc; both-fail = corpus artifact")
     ap.add_argument("--bench", action="store_true",
@@ -183,7 +187,7 @@ def main():
 
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             results = list(pool.map(
-                lambda f: compile_one(solar, root, includes, f, args.timeout), files))
+                lambda f: compile_one(solar, root, includes, f, args.timeout, args.opt), files))
 
         counts = {"OK": 0, "DIAG": 0, "DEP": 0, "ICE": 0, "TIMEOUT": 0}
         for res in results:
