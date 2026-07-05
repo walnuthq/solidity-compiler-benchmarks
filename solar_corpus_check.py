@@ -78,6 +78,8 @@ AAVE_LOGIC_LIBS = ",".join(
 LINKED_SIZE_CHECKS = [
     ("Pool (linked)", "aave-v3-core", ["contracts"],
      "contracts/protocol/pool/Pool.sol", "Pool", AAVE_LOGIC_LIBS),
+    ("L2Pool (linked)", "aave-v3-core", ["contracts"],
+     "contracts/protocol/pool/L2Pool.sol", "L2Pool", AAVE_LOGIC_LIBS),
     ("PoolConfigurator (linked)", "aave-v3-core", ["contracts"],
      "contracts/protocol/pool/PoolConfigurator.sol", "PoolConfigurator", AAVE_LOGIC_LIBS),
 ]
