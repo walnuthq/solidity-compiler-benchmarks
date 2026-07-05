@@ -311,11 +311,19 @@ def main():
     # sweep compiles them with every public library call inlined, a
     # configuration solc cannot even express (its library-free Pool is
     # already 30070 B unoptimized). Report those as informational notes;
-    # their deployable (--libraries) sizes are measured below.
-    linked_models = {entry[4] for entry in LINKED_SIZE_CHECKS + LINKED_SIZE_NOTES}
+    # their deployable (--libraries) sizes are measured below. Matched by
+    # (file, contract) so an unrelated same-named contract still warns.
+    linked_models = {
+        (Path(entry[3]).name, entry[4])
+        for entry in LINKED_SIZE_CHECKS + LINKED_SIZE_NOTES
+    }
+    # Contracts with their own [size] gate line above never re-print here.
+    gated = {(basename, contract) for _, basename, contract in CRITICAL_SIZES}
     for (name, contract), size in sorted(size_warnings.items(), key=lambda kv: -kv[1]):
-        short = contract.rsplit(":", 1)[-1]
-        if short in linked_models:
+        file_part, _, short = contract.rpartition(":")
+        if (file_part, short) in gated:
+            continue
+        if (file_part, short) in linked_models:
             print(f"[size] note: {contract} = {size} B fully inlined "
                   f"(deploys via --libraries; see \"{short} (linked)\") [{name}]")
         else:
@@ -363,7 +371,13 @@ def main():
             cwd=REPO).returncode
 
     if args.ui:
-        solar_repo = solar.resolve().parents[2] if solar.name == "solar" else REPO.parent / "solar"
+        # The binary normally lives at <repo>/target/debug/solar; verify the
+        # derived repo actually is a cargo workspace before using it.
+        derived = solar.resolve().parents[2] if len(solar.resolve().parents) > 2 else None
+        if derived is not None and (derived / "Cargo.toml").is_file():
+            solar_repo = derived
+        else:
+            solar_repo = REPO.parent / "solar"
         print(f"\n=== solar UI tests ({solar_repo}) ===")
         ui_rc = subprocess.run(
             ["cargo", "test", "-q", "-p", "solar-compiler", "--test", "tests"],
