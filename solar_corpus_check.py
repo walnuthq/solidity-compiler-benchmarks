@@ -53,7 +53,7 @@ PROJECTS = [
     ("aave-protocol", "aave-v3-core", ["contracts"], ["contracts/protocol"], True),
     ("aave-flashloan", "aave-v3-core", ["contracts"], ["contracts/flashloan"], False),
     ("aave-misc", "aave-v3-core", ["contracts"], ["contracts/misc"], False),
-    ("nitro-osp", "nitro-contracts", ["src", "node_modules"], ["src/osp"], False),
+    ("nitro-osp", "nitro-contracts", ["src", "node_modules"], ["src/osp"], True),
     ("nitro-state", "nitro-contracts", ["src", "node_modules"], ["src/state"], False),
     ("nitro-mocks", "nitro-contracts", ["src", "node_modules"], ["src/mocks"], False),
 ]
