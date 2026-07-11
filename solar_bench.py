@@ -15,7 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from gas_bench import TEST_CASES, TestCase
 
@@ -99,19 +99,45 @@ def verbose_log(enabled: bool, message: str) -> None:
         print(message, flush=True)
 
 
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    peak_rss_bytes: Optional[int] = None
+
+
+def read_peak_rss(path: Path) -> Optional[int]:
+    try:
+        peak_rss_kib = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return peak_rss_kib * 1024
+
 
 def run(
     cmd: Sequence[str],
     input_text: Optional[str] = None,
     timeout: int = 120,
     cwd: Optional[Path] = None,
-) -> subprocess.CompletedProcess[str]:
+    measure_peak_rss: bool = False,
+) -> CommandResult:
     start = time.monotonic()
+    peak_rss_path = None
+    run_cmd = list(cmd)
+    if measure_peak_rss and sys.platform.startswith("linux"):
+        time_binary = Path("/usr/bin/time")
+        if time_binary.is_file():
+            fd, raw_path = tempfile.mkstemp(prefix="solar-bench-rss-")
+            os.close(fd)
+            peak_rss_path = Path(raw_path)
+            run_cmd = [str(time_binary), "-q", "-f", "%M", "-o", raw_path, "--", *cmd]
+
     kwargs = {}
     if os.name != "nt":
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(
-        cmd,
+        run_cmd,
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -139,8 +165,15 @@ def run(
         message = f"TIMEOUT after {elapsed:.1f}s: {display_command(cmd)}"
         if stderr:
             message = f"{message}\n{stderr}"
-        return subprocess.CompletedProcess(cmd, -1, stdout or "", message)
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        result = CommandResult(-1, stdout or "", message)
+    else:
+        result = CommandResult(proc.returncode, stdout, stderr)
+
+    if peak_rss_path is not None:
+        peak_rss_bytes = read_peak_rss(peak_rss_path)
+        peak_rss_path.unlink(missing_ok=True)
+        result = CommandResult(result.returncode, result.stdout, result.stderr, peak_rss_bytes)
+    return result
 
 
 def find_binary(explicit: Optional[str], candidates: Sequence[str]) -> Optional[Path]:
@@ -919,6 +952,7 @@ def compile_standard_json(spec: CompilerSpec, test_case: TestCase) -> Dict[str, 
         "runtime_bytecode": "",
         "bytecode_size": 0,
         "runtime_size": 0,
+        "peak_rss_bytes": None,
         "error": "",
     }
     sj_cmd = [str(spec.path)]
@@ -926,7 +960,13 @@ def compile_standard_json(spec: CompilerSpec, test_case: TestCase) -> Dict[str, 
         # Solar gates its experimental code generator behind `-Zcodegen`.
         sj_cmd.append("-Zcodegen")
     sj_cmd.append("--standard-json")
-    proc = run(sj_cmd, input_text=standard_json_input(test_case), timeout=120)
+    proc = run(
+        sj_cmd,
+        input_text=standard_json_input(test_case),
+        timeout=120,
+        measure_peak_rss=True,
+    )
+    result["peak_rss_bytes"] = proc.peak_rss_bytes
     result["command"] = display_command(sj_cmd)
     if proc.returncode != 0:
         result["status"] = "failed"
@@ -997,6 +1037,7 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
         "runtime_bytecode": "",
         "bytecode_size": 0,
         "runtime_size": 0,
+        "peak_rss_bytes": None,
         "error": "",
         "source": str(case.source_path.relative_to(ROOT)),
         "project": case.project,
@@ -1032,7 +1073,8 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
                 cmd.extend(["--include-path", import_path])
             cmd.extend(case.remappings)
             cmd.append(case.source)
-            proc = run(cmd, timeout=180, cwd=case.repo_path)
+            proc = run(cmd, timeout=180, cwd=case.repo_path, measure_peak_rss=True)
+            result["peak_rss_bytes"] = proc.peak_rss_bytes
             result["command"] = display_command(cmd)
             if proc.returncode != 0:
                 result["status"] = "failed"
@@ -1062,7 +1104,8 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
                 cmd.extend(["-I", import_path])
             cmd.extend(case.remappings)
             cmd.append(case.source)
-            proc = run(cmd, timeout=180, cwd=case.repo_path)
+            proc = run(cmd, timeout=180, cwd=case.repo_path, measure_peak_rss=True)
+            result["peak_rss_bytes"] = proc.peak_rss_bytes
             result["command"] = display_command(cmd)
             if proc.returncode != 0:
                 result["status"] = "failed"
@@ -1447,6 +1490,63 @@ def print_size_table(results: Sequence[Dict[str, object]], specs: Sequence[Compi
         print(row)
 
 
+def print_memory_table(results: Sequence[Dict[str, object]], specs: Sequence[CompilerSpec]) -> None:
+    def peak_rss(result: Dict[str, object], compiler_id: str) -> Optional[int]:
+        data = result["compilers"].get(compiler_id, {})
+        value = data.get("peak_rss_bytes")
+        if data.get("status") != "ok" or not isinstance(value, int):
+            return None
+        return value
+
+    values_by_compiler = {
+        spec.compiler_id: [
+            (str(result["test_id"]), value)
+            for result in results
+            if (value := peak_rss(result, spec.compiler_id)) is not None
+        ]
+        for spec in specs
+    }
+    if not any(values_by_compiler.values()):
+        return
+
+    print("\n" + _color("Peak RSS Comparison", BOLD))
+    test_width = max(22, *(visible_len(str(result["test_id"])) for result in results)) if results else 22
+    header = f"{'Test':<{test_width}}"
+    for spec in specs:
+        header += f" | {spec.compiler_id:<13}"
+    if {"solar", "solc"}.issubset(values_by_compiler):
+        header += " | Solar vs solc"
+    print(header)
+    print("-" * len(header))
+
+    for result in results:
+        row = f"{str(result['test_id']):<{test_width}}"
+        values = {}
+        for spec in specs:
+            value = peak_rss(result, spec.compiler_id)
+            values[spec.compiler_id] = value
+            cell = "N/A" if value is None else f"{value / (1024 * 1024):,.1f} MiB"
+            row += f" | {cell:<13}"
+        if "solar" in values and "solc" in values:
+            row += f" | {pct_delta(values['solc'] or 0, values['solar'] or 0)}"
+        print(row)
+
+    print("\nPeak RSS Summary")
+    print("Compiler      | Benches | Average       | Maximum       | Maximum bench")
+    print("--------------|---------|---------------|---------------|--------------")
+    for spec in specs:
+        values = values_by_compiler[spec.compiler_id]
+        if not values:
+            continue
+        max_bench, maximum = max(values, key=lambda item: item[1])
+        average = sum(value for _, value in values) / len(values)
+        print(
+            f"{spec.compiler_id:<13} | {len(values):>7} | "
+            f"{average / (1024 * 1024):>9,.1f} MiB | "
+            f"{maximum / (1024 * 1024):>9,.1f} MiB | {max_bench}"
+        )
+
+
 def print_runtime_table(results: Sequence[Dict[str, object]]) -> None:
     print("\n" + _color("Runtime Result Match", BOLD))
     test_width = max(22, *(visible_len(str(result["test_id"])) for result in results)) if results else 22
@@ -1711,6 +1811,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stop_anvil(anvil_proc)
 
     print_size_table(results, specs)
+    print_memory_table(results, specs)
     if args.gas:
         print_runtime_table(results)
         print_gas_table(results, specs)
