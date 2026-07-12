@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -37,6 +38,7 @@ CAST_TX_TIMEOUT = 30
 CAST_READ_TIMEOUT = 10
 CAST_RPC_TIMEOUT = 10
 CAST_GAS_LIMIT = "30000000"
+RUNTIME_FIXTURES = ROOT / "fixtures/runtime/RuntimeFixtures.sol"
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -1082,6 +1084,44 @@ def compile_repo_case(spec: CompilerSpec, case: SourceCase) -> Dict[str, object]
     return result
 
 
+@lru_cache(maxsize=None)
+def compile_runtime_fixture(solc_path: str, contract_name: str) -> Tuple[Optional[str], str]:
+    source_name = str(RUNTIME_FIXTURES.relative_to(ROOT))
+    payload = {
+        "language": "Solidity",
+        "sources": {source_name: {"content": RUNTIME_FIXTURES.read_text()}},
+        "settings": {
+            "optimizer": {"enabled": True, "runs": 200},
+            "outputSelection": {"*": {contract_name: ["evm.bytecode.object"]}},
+        },
+    }
+    proc = run([solc_path, "--standard-json"], input_text=json.dumps(payload), timeout=120)
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or "fixture compiler failed")[:1000]
+    try:
+        output = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"invalid fixture compiler JSON: {exc}"
+    errors = [
+        error.get("formattedMessage") or error.get("message") or str(error)
+        for error in output.get("errors") or []
+        if error.get("severity") == "error"
+    ]
+    if errors:
+        return None, errors[0][:1000]
+    bytecode = (
+        output.get("contracts", {})
+        .get(source_name, {})
+        .get(contract_name, {})
+        .get("evm", {})
+        .get("bytecode", {})
+        .get("object", "")
+    )
+    if not bytecode:
+        return None, f"fixture contract {contract_name} was not produced"
+    return str(bytecode), ""
+
+
 def check_tool(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -1122,11 +1162,26 @@ def deploy_contract(
     rpc_url: str,
     private_key: str,
 ) -> Tuple[Optional[str], Optional[int], str]:
+    return deploy_creation_code(
+        bytecode,
+        test_case.constructor_args,
+        getattr(test_case, "constructor_sig", None),
+        rpc_url,
+        private_key,
+    )
+
+
+def deploy_creation_code(
+    bytecode: str,
+    constructor_args: Sequence[str],
+    constructor_sig: Optional[str],
+    rpc_url: str,
+    private_key: str,
+) -> Tuple[Optional[str], Optional[int], str]:
     if not bytecode.startswith("0x"):
         bytecode = "0x" + bytecode
 
-    constructor_sig = getattr(test_case, "constructor_sig", None)
-    encoded = abi_encode_constructor(test_case.constructor_args, constructor_sig)
+    encoded = abi_encode_constructor(constructor_args, constructor_sig)
     if encoded is None:
         return None, None, "constructor args require constructor_sig"
     bytecode += encoded
@@ -1248,6 +1303,382 @@ def read_contract(
     return value, ""
 
 
+def rpc_request(method: str, params: Sequence[object], rpc_url: str) -> Tuple[Optional[object], str]:
+    proc = run(
+        ["cast", "rpc", "--rpc-url", rpc_url, "--raw", method, json.dumps(list(params))],
+        timeout=CAST_READ_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or f"{method} failed")[:1000]
+    try:
+        return json.loads(proc.stdout), ""
+    except json.JSONDecodeError as exc:
+        return None, f"invalid {method} JSON: {exc}"
+
+
+def send_value(address: str, amount: str, rpc_url: str, private_key: str) -> str:
+    proc = run(
+        [
+            "cast",
+            "send",
+            address,
+            "--value",
+            amount,
+            "--rpc-url",
+            rpc_url,
+            "--rpc-timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--timeout",
+            str(CAST_RPC_TIMEOUT),
+            "--gas-limit",
+            CAST_GAS_LIMIT,
+            "--private-key",
+            private_key,
+            "--json",
+        ],
+        timeout=CAST_TX_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        return proc.stderr[:1000]
+    try:
+        receipt = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return f"invalid value-transfer JSON: {exc}"
+    status = parse_receipt_int(receipt.get("status"))
+    return "" if status in (None, 1) else f"value transfer failed (status={status})"
+
+
+def encode_calldata(signature: str, args: Sequence[str]) -> Tuple[Optional[str], str]:
+    proc = run(["cast", "calldata", signature, *args], timeout=30)
+    if proc.returncode != 0:
+        return None, proc.stderr[:1000]
+    return proc.stdout.strip(), ""
+
+
+def eth_call_raw(
+    address: str,
+    signature: str,
+    args: Sequence[str],
+    rpc_url: str,
+) -> Tuple[Optional[str], Optional[str], str]:
+    calldata, error = encode_calldata(signature, args)
+    if calldata is None:
+        return None, None, error
+    proc = run(
+        [
+            "cast",
+            "rpc",
+            "--rpc-url",
+            rpc_url,
+            "--raw",
+            "eth_call",
+            json.dumps([{"to": address, "data": calldata}, "latest"]),
+        ],
+        timeout=CAST_READ_TIMEOUT,
+    )
+    if proc.returncode == 0:
+        try:
+            value = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            return None, None, f"invalid eth_call JSON: {exc}"
+        return str(value).lower(), None, ""
+
+    message = proc.stderr or proc.stdout or "eth_call failed"
+    data_matches = re.findall(r"0x[0-9a-fA-F]+", message)
+    if data_matches:
+        return None, data_matches[-1].lower(), ""
+    return None, None, message[:1000]
+
+
+def runtime_ok(label: str, value: object) -> Dict[str, object]:
+    return {"label": label, "status": "ok", "value": str(value)}
+
+
+def runtime_error(label: str, error: str) -> Dict[str, object]:
+    return {"label": label, "status": "failed", "error": error}
+
+
+def checked_value(label: str, actual: object, expected: object) -> Dict[str, object]:
+    actual_text = str(actual)
+    expected_text = str(expected)
+    if actual_text != expected_text:
+        return runtime_error(label, f"expected {expected_text}, got {actual_text}")
+    return runtime_ok(label, actual_text)
+
+
+def read_uint(
+    address: str,
+    signature: str,
+    args: Sequence[str],
+    rpc_url: str,
+) -> Tuple[Optional[int], str]:
+    value, error = read_contract(address, signature, args, rpc_url)
+    if value is None:
+        return None, error
+    try:
+        return int(value.split()[0], 0), ""
+    except (ValueError, IndexError):
+        return None, f"invalid uint result: {value}"
+
+
+def read_address(
+    address: str,
+    signature: str,
+    args: Sequence[str],
+    rpc_url: str,
+) -> Tuple[Optional[str], str]:
+    value, error = read_contract(address, signature, args, rpc_url)
+    if value is None:
+        return None, error
+    match = re.search(r"0x[0-9a-fA-F]{40}", value)
+    return (match.group(0).lower(), "") if match else (None, f"invalid address result: {value}")
+
+
+def decode_words(data: str) -> List[int]:
+    raw = data[2:] if data.startswith("0x") else data
+    if len(raw) % 64 != 0:
+        raise ValueError(f"ABI result has {len(raw)} hex digits")
+    return [int(raw[index:index + 64], 16) for index in range(0, len(raw), 64)]
+
+
+def run_vesting_cold_paths(
+    address: str,
+    solc_path: Path,
+    rpc_url: str,
+    private_key: str,
+) -> List[Dict[str, object]]:
+    error = send_value(address, "1000", rpc_url, private_key)
+    if error:
+        return [runtime_error("cold-vesting-eth-setup", error)]
+    _, error = call_contract(address, "release()", (), rpc_url, private_key)
+    if error:
+        return [runtime_error("cold-vesting-eth-release", error)]
+
+    token_bytecode, error = compile_runtime_fixture(str(solc_path), "RuntimeERC20")
+    if token_bytecode is None:
+        return [runtime_error("cold-vesting-token-compile", error)]
+    token, _, error = deploy_creation_code(
+        token_bytecode,
+        (address, "2000"),
+        "constructor(address,uint256)",
+        rpc_url,
+        private_key,
+    )
+    if token is None:
+        return [runtime_error("cold-vesting-token-deploy", error)]
+    _, error = call_contract(address, "release(address)", (token,), rpc_url, private_key)
+    if error:
+        return [runtime_error("cold-vesting-token-release", error)]
+
+    observations = []
+    reads = (
+        ("cold-vesting-released-eth", address, "released()(uint256)", (), 1000),
+        ("cold-vesting-releasable-eth", address, "releasable()(uint256)", (), 0),
+        ("cold-vesting-released-token", address, "released(address)(uint256)", (token,), 2000),
+        ("cold-vesting-releasable-token", address, "releasable(address)(uint256)", (token,), 0),
+        ("cold-vesting-token-empty", token, "balanceOf(address)(uint256)", (address,), 0),
+        ("cold-vesting-owner-token", token, "balanceOf(address)(uint256)", (DEFAULT_SENDER,), 2000),
+    )
+    for label, target, signature, args, expected in reads:
+        value, error = read_uint(target, signature, args, rpc_url)
+        observations.append(runtime_error(label, error) if value is None else checked_value(label, value, expected))
+    balance, error = rpc_request("eth_getBalance", (address, "latest"), rpc_url)
+    if balance is None:
+        observations.append(runtime_error("cold-vesting-eth-empty", error))
+    else:
+        observations.append(checked_value("cold-vesting-eth-empty", int(str(balance), 16), 0))
+    return observations
+
+
+def run_fractional_cold_paths(
+    address: str,
+    solc_path: Path,
+    rpc_url: str,
+    private_key: str,
+) -> List[Dict[str, object]]:
+    nft_bytecode, error = compile_runtime_fixture(str(solc_path), "RuntimeNFT")
+    if nft_bytecode is None:
+        return [runtime_error("cold-fractional-nft-compile", error)]
+    nft, _, error = deploy_creation_code(nft_bytecode, (), None, rpc_url, private_key)
+    if nft is None:
+        return [runtime_error("cold-fractional-nft-deploy", error)]
+    _, error = call_contract(nft, "setApprovalForAll(address,bool)", (address, "true"), rpc_url, private_key)
+    if error:
+        return [runtime_error("cold-fractional-approve-nft", error)]
+    _, error = call_contract(
+        address,
+        "split(address,uint256,uint256,string,string)",
+        (nft, "1", "1000", "Fractionalized NFT", "FRAC"),
+        rpc_url,
+        private_key,
+    )
+    if error:
+        return [runtime_error("cold-fractional-split", error)]
+
+    vault_data, _, error = eth_call_raw(address, "getVault(uint256)", ("1",), rpc_url)
+    if vault_data is None:
+        return [runtime_error("cold-fractional-vault", error or "getVault reverted")]
+    try:
+        vault = decode_words(vault_data)
+    except ValueError as exc:
+        return [runtime_error("cold-fractional-vault", str(exc))]
+    if len(vault) != 4:
+        return [runtime_error("cold-fractional-vault", f"expected 4 words, got {len(vault)}")]
+    token = "0x" + f"{vault[3]:040x}"
+
+    observations = [
+        checked_value("cold-fractional-vault-nft", vault[0] == int(nft, 16), True),
+        checked_value("cold-fractional-vault-token-id", vault[1], 1),
+        checked_value("cold-fractional-vault-supply", vault[2], 1000),
+        checked_value("cold-fractional-share-created", vault[3] != 0, True),
+    ]
+    nft_owner, error = read_address(nft, "ownerOf(uint256)(address)", ("1",), rpc_url)
+    observations.append(
+        runtime_error("cold-fractional-nft-custody", error)
+        if nft_owner is None
+        else checked_value("cold-fractional-nft-custody", nft_owner == address.lower(), True)
+    )
+    share_balance, error = read_uint(token, "balanceOf(address)(uint256)", (DEFAULT_SENDER,), rpc_url)
+    observations.append(
+        runtime_error("cold-fractional-share-minted", error)
+        if share_balance is None
+        else checked_value("cold-fractional-share-minted", share_balance, 1000)
+    )
+
+    _, error = call_contract(token, "approve(address,uint256)", (address, MAX_UINT256), rpc_url, private_key)
+    if error:
+        observations.append(runtime_error("cold-fractional-approve-share", error))
+        return observations
+    _, error = call_contract(address, "join(uint256)", ("1",), rpc_url, private_key)
+    if error:
+        observations.append(runtime_error("cold-fractional-join", error))
+        return observations
+
+    empty_vault, _, error = eth_call_raw(address, "getVault(uint256)", ("1",), rpc_url)
+    if empty_vault is None:
+        observations.append(runtime_error("cold-fractional-vault-cleared", error or "getVault reverted"))
+    else:
+        observations.append(checked_value("cold-fractional-vault-cleared", all(word == 0 for word in decode_words(empty_vault)), True))
+    nft_owner, error = read_address(nft, "ownerOf(uint256)(address)", ("1",), rpc_url)
+    observations.append(
+        runtime_error("cold-fractional-nft-returned", error)
+        if nft_owner is None
+        else checked_value("cold-fractional-nft-returned", nft_owner, DEFAULT_SENDER.lower())
+    )
+    share_balance, error = read_uint(token, "balanceOf(address)(uint256)", (DEFAULT_SENDER,), rpc_url)
+    observations.append(
+        runtime_error("cold-fractional-share-burned", error)
+        if share_balance is None
+        else checked_value("cold-fractional-share-burned", share_balance, 0)
+    )
+    return observations
+
+
+def keccak256(data: bytes) -> bytes:
+    proc = run(["cast", "keccak", "0x" + data.hex()], timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr[:1000])
+    return bytes.fromhex(proc.stdout.strip().removeprefix("0x"))
+
+
+@lru_cache(maxsize=None)
+def nitro_dispatch_vector(opcode: int) -> Tuple[str, str]:
+    zero = bytes(32)
+    u32_zero = bytes(4)
+    u64_zero = bytes(8)
+    u256_zero = bytes(32)
+    instruction = opcode.to_bytes(2, "big") + u256_zero
+    instructions_hash = keccak256(b"Instructions:" + b"\x01" + instruction)
+    functions_root = keccak256(b"Function:" + instructions_hash)
+    memory_hash = keccak256(b"Memory:" + u64_zero + u64_zero + zero)
+    module = zero + u64_zero + u64_zero + zero + zero + functions_root + zero + u32_zero
+    module_hash = keccak256(b"Module:" + zero + memory_hash + zero + functions_root + zero + u32_zero)
+
+    inactive_multi = zero + zero
+    multistack_hash = keccak256(b"multistack:" + zero + zero + zero)
+    recovery_pc = bytes([0xff]) * 32
+    machine = (
+        b"\x00"
+        + zero + u256_zero
+        + inactive_multi
+        + zero + u256_zero
+        + zero + b"\x00"
+        + inactive_multi
+        + zero
+        + u32_zero + u32_zero + u32_zero
+        + recovery_pc
+        + module_hash
+    )
+    before_hash = keccak256(
+        b"Machine running:"
+        + multistack_hash
+        + zero
+        + multistack_hash
+        + zero
+        + u32_zero + u32_zero + u32_zero
+        + recovery_pc
+        + module_hash
+    )
+    proof = machine + module + b"\x00" + b"\x01" + instruction + b"\x00\x00"
+    return "0x" + before_hash.hex(), "0x" + proof.hex()
+
+
+def run_nitro_cold_paths(address: str, rpc_url: str) -> List[Dict[str, object]]:
+    dispatches = (
+        ("prover0", 0x01, DEFAULT_SENDER, 1),
+        ("prover-mem", 0x28, DEFAULT_SPENDER, 2),
+        ("prover-math", 0x6A, DEFAULT_THIRD, 3),
+        ("prover-host-io", 0x8010, DEFAULT_FOURTH, 4),
+    )
+    observations = []
+    try:
+        for _, _, prover, marker in dispatches:
+            code = f"0x60{marker:02x}60005260206000fd"
+            _, error = rpc_request("anvil_setCode", (prover, code), rpc_url)
+            if error:
+                return [runtime_error("cold-nitro-install-provers", error)]
+
+        for label, opcode, _, marker in dispatches:
+            try:
+                before_hash, proof = nitro_dispatch_vector(opcode)
+            except RuntimeError as exc:
+                observations.append(runtime_error(f"cold-nitro-{label}", str(exc)))
+                continue
+            _, revert_data, error = eth_call_raw(
+                address,
+                "proveOneStep((uint256,address,bytes32),uint256,bytes32,bytes)",
+                (f"(1000000,{ZERO_ADDRESS},0x{'00' * 32})", "0", before_hash, proof),
+                rpc_url,
+            )
+            expected = f"0x{marker:064x}"
+            if error:
+                observations.append(runtime_error(f"cold-nitro-{label}", error))
+            elif revert_data is None:
+                observations.append(runtime_error(f"cold-nitro-{label}", "expected mock-prover revert"))
+            else:
+                observations.append(checked_value(f"cold-nitro-{label}", revert_data, expected))
+    finally:
+        for _, _, prover, _ in dispatches:
+            rpc_request("anvil_setCode", (prover, "0x"), rpc_url)
+    return observations
+
+
+def run_cold_path_checks(
+    test_case: TestCase | SourceCase,
+    address: str,
+    solc_path: Path,
+    rpc_url: str,
+    private_key: str,
+) -> List[Dict[str, object]]:
+    if test_case.test_id == "openzeppelin-vesting-wallet":
+        return run_vesting_cold_paths(address, solc_path, rpc_url, private_key)
+    if test_case.test_id == "lilweb3-fractional":
+        return run_fractional_cold_paths(address, solc_path, rpc_url, private_key)
+    if test_case.test_id == "nitro-one-step-proof":
+        return run_nitro_cold_paths(address, rpc_url)
+    return []
+
+
 def compare_runtime_results(entry: Dict[str, object], specs: Sequence[CompilerSpec]) -> None:
     labels = []
     values_by_compiler: Dict[str, Dict[str, str]] = {}
@@ -1314,6 +1745,7 @@ def run_test_case(
     if isinstance(test_case, SourceCase):
         entry["project"] = test_case.project
         entry["source"] = str(test_case.source_path.relative_to(ROOT))
+    reference_solc = next((spec for spec in specs if spec.kind == "solc"), None)
 
     for spec in specs:
         verbose_log(verbose, f"[{test_case.test_id}] compiling with {spec.compiler_id}")
@@ -1328,9 +1760,14 @@ def run_test_case(
 
         checks = runtime_checks(test_case)
         calls = gas_calls(test_case, gas_profile)
+        has_cold_paths = test_case.test_id in {
+            "openzeppelin-vesting-wallet",
+            "nitro-one-step-proof",
+            "lilweb3-fractional",
+        }
         if compiled["status"] != "ok" or not include_gas:
             continue
-        if not calls and not checks:
+        if not calls and not checks and not has_cold_paths:
             compiler_entry["deploy_status"] = "skipped"
             compiler_entry["runtime_status"] = "skipped"
             continue
@@ -1402,7 +1839,21 @@ def run_test_case(
                 "status": "ok",
                 "value": value,
             })
-        if checks:
+        if has_cold_paths:
+            if reference_solc is None:
+                cold_results = [runtime_error("cold-path-setup", "reference solc is required")]
+            else:
+                verbose_log(verbose, f"[{test_case.test_id}] {spec.compiler_id} cold-path differential")
+                cold_results = run_cold_path_checks(
+                    test_case,
+                    address,
+                    reference_solc.path,
+                    rpc_url,
+                    private_key,
+                )
+            runtime_results.extend(cold_results)
+            runtime_failed |= any(result.get("status") != "ok" for result in cold_results)
+        if checks or has_cold_paths:
             compiler_entry["runtime_results"] = runtime_results
             compiler_entry["runtime_status"] = "failed" if runtime_failed else "ok"
 

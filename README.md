@@ -107,7 +107,7 @@ Use the `hot` profile when tracking optimizer wins. It runs broader stateful wor
 ./solar_bench.py --solar ../solar/target/debug/solar --suite repo --gas --gas-profile hot --start-anvil
 ```
 
-Runtime checks are curated per benchmark. They deploy both compiler outputs, run the configured transactions, then compare read-only results such as public storage getters. Mismatches are printed in verbose mode and recorded in `runtime_mismatches` in the JSON output.
+Runtime checks are curated per benchmark. They deploy both compiler outputs, run the configured transactions, then compare read-only results such as public storage getters. The `smoke` and `hot` profiles also exercise cold paths that their ordinary gas calls do not reach: native and ERC-20 vesting releases, NFT split/join custody, and Nitro one-step dispatch across control, memory, math, and host-I/O opcode classes. These semantic checks are excluded from gas totals. Mismatches are printed in verbose mode and recorded in `runtime_mismatches` in the JSON output.
 
 If `solc` is managed by `solc-select`, select or install a concrete version before running:
 
